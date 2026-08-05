@@ -133,6 +133,8 @@ def test_builtin_catalog_golden_anthropic_entry() -> None:
     assert opus_5.cost is not None
     assert opus_5.cost["input"] == 5
     assert opus_5.cost["output"] == 25
+    assert opus_5.cost["cacheWrite"] == 6.25
+    assert opus_5.cost["cacheWrite1h"] == 10
     assert opus_5.compat == {"forceAdaptiveThinking": True}
     assert opus_5.thinking_level_map == {"minimal": None, "xhigh": "max"}
     assert entry.thinking_levels == ("off", "minimal", "low", "medium", "high", "xhigh")
@@ -154,6 +156,7 @@ def test_builtin_catalog_separates_openai_api_and_codex_context_limits() -> None
     assert "gpt-5.6" not in codex.models
     assert "gpt-5.6" not in codex.context_windows
     assert "gpt-5.6" not in codex.model_metadata
+    assert codex.removed_models == ("gpt-5.6",)
     assert openai.context_windows["gpt-5.6-sol"] == 1_050_000
     assert codex.context_windows["gpt-5.6-sol"] == 272_000
     assert codex.context_windows["gpt-5.6-terra"] == 272_000
@@ -512,6 +515,35 @@ default_model = "claude-next-1"
     assert entry.thinking_parameter == "anthropic.thinking"
 
 
+def test_builtin_tombstone_removes_model_from_user_catalog_overlay(tmp_path: Path) -> None:
+    paths = _write_user_catalog(
+        tmp_path / ".tau",
+        """
+[[providers]]
+name = "openai-codex"
+models = ["gpt-5.6"]
+default_model = "gpt-5.6"
+thinking_models = ["gpt-5.6"]
+
+[providers.context_windows]
+"gpt-5.6" = 272000
+
+[providers.model_metadata."gpt-5.6"]
+name = "GPT-5.6"
+""",
+    )
+
+    entry = next(e for e in effective_catalog(paths) if e.name == "openai-codex")
+
+    assert entry.default_model == "gpt-5.5"
+    assert "gpt-5.6" not in entry.models
+    assert "gpt-5.6" not in entry.thinking_models
+    assert entry.context_windows is not None
+    assert "gpt-5.6" not in entry.context_windows
+    assert "gpt-5.6" not in entry.model_metadata
+    assert entry.removed_models == ("gpt-5.6",)
+
+
 def test_user_catalog_thinking_fields_replace_as_group(tmp_path: Path) -> None:
     paths = _write_user_catalog(
         tmp_path / ".tau",
@@ -565,6 +597,38 @@ cost_tiers = [
         model_cost_for_input_tokens(reloaded.model_metadata["MiniMax-M3"], 400_001)
         == long_context_cost
     )
+
+
+def test_user_catalog_cost_tier_accepts_one_hour_cache_write_rate(tmp_path: Path) -> None:
+    paths = _write_user_catalog(
+        tmp_path / ".tau",
+        """
+[[providers]]
+name = "minimax"
+
+[providers.model_metadata."MiniMax-M3"]
+cost_tiers = [
+  { max_input_tokens = 400000, input = 0.2, output = 1.0, cacheRead = 0.04, cacheWrite = 0.25 },
+  { input = 0.5, output = 2.0, cacheRead = 0.1, cacheWrite = 0.6, cacheWrite1h = 1.0 },
+]
+""",
+    )
+    entry = next(e for e in effective_catalog(paths) if e.name == "minimax")
+    metadata = entry.model_metadata["MiniMax-M3"]
+    assert model_cost_for_input_tokens(metadata, 400_001) == {
+        "input": 0.5,
+        "output": 2.0,
+        "cacheRead": 0.1,
+        "cacheWrite": 0.6,
+        "cacheWrite1h": 1.0,
+    }
+    # Tiers without the key omit it, so billing can fall back to cacheWrite.
+    assert model_cost_for_input_tokens(metadata, 400_000) == {
+        "input": 0.2,
+        "output": 1.0,
+        "cacheRead": 0.04,
+        "cacheWrite": 0.25,
+    }
 
 
 def test_user_catalog_rejects_bounded_final_cost_tier(tmp_path: Path) -> None:

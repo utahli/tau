@@ -65,6 +65,35 @@ def test_direct_openai_runtime_enables_responses_cache_affinity(tmp_path) -> Non
     assert provider._config.compat["sessionAffinityFormat"] == "openai"
 
 
+def test_huggingface_runtime_pins_backing_provider_with_model_alias(tmp_path) -> None:
+    store = FileCredentialStore(tmp_path / "credentials.json")
+    store.set_api_key("huggingface", "hf-test")
+    config = provider_config_from_catalog_entry("huggingface")
+
+    provider = create_model_provider(
+        config,
+        credential_store=store,
+        model="zai-org/GLM-5.2",
+        inference_provider="deepinfra",
+    )
+
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider._config.model_aliases == {"zai-org/GLM-5.2": "zai-org/GLM-5.2:deepinfra"}
+
+
+def test_huggingface_runtime_rejects_policy_suffix(tmp_path) -> None:
+    store = FileCredentialStore(tmp_path / "credentials.json")
+    store.set_api_key("huggingface", "hf-test")
+
+    with pytest.raises(ProviderConfigError, match="explicit"):
+        create_model_provider(
+            provider_config_from_catalog_entry("huggingface"),
+            credential_store=store,
+            model="zai-org/GLM-5.2",
+            inference_provider="fastest",
+        )
+
+
 def test_compatible_gateway_defaults_to_no_openai_cache_affinity(tmp_path) -> None:
     store = FileCredentialStore(tmp_path / "credentials.json")
     store.set_api_key("together", "gateway-key")
@@ -301,7 +330,7 @@ def test_create_model_provider_coerces_unsupported_startup_thinking_level(
 ) -> None:
     # Regression: startup used to pass the global default ("medium") straight
     # to create_model_provider, which crashed for models like kimi-code:k3
-    # that only support xhigh.
+    # that only support xhigh. Now k3 also supports low and high.
     monkeypatch.setenv("TAU_TEST_KIMI_CODE_API_KEY", "test-key")
     store = FileCredentialStore(tmp_path / "credentials.json")
     provider_config = OpenAICompatibleProviderConfig(
@@ -309,8 +338,8 @@ def test_create_model_provider_coerces_unsupported_startup_thinking_level(
         api_key_env="TAU_TEST_KIMI_CODE_API_KEY",
         models=("k3",),
         default_model="k3",
-        thinking_levels=("medium", "xhigh"),
-        thinking_default="medium",
+        thinking_levels=("low", "medium", "high", "xhigh"),
+        thinking_default="xhigh",
         thinking_parameter="reasoning_effort",
         model_metadata={
             "k3": ProviderModelMetadata(
@@ -318,9 +347,9 @@ def test_create_model_provider_coerces_unsupported_startup_thinking_level(
                 thinking_level_map={
                     "off": None,
                     "minimal": None,
-                    "low": None,
+                    "low": "low",
                     "medium": None,
-                    "high": None,
+                    "high": "high",
                     "xhigh": "max",
                 },
             ),

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Mapping
 from json import JSONDecodeError, dumps, loads
+import logging
 from typing import Any, Protocol
 
 import httpx
@@ -64,6 +65,23 @@ def _use_responses_api(model: str) -> bool:
     if "codex" in normalized:
         return True
     return any(normalized.startswith(prefix) for prefix in _RESPONSES_ONLY_PREFIXES)
+
+
+_logger = logging.getLogger("tau_ai.openai_compatible")
+
+# Header names whose values are masked in debug logs to avoid leaking secrets.
+_SENSITIVE_HEADER_PREFIXES = ("authorization", "x-api-key", "api-key", "cookie")
+
+
+def _mask_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Return a copy of headers with sensitive values redacted."""
+    masked: dict[str, str] = {}
+    for key, value in headers.items():
+        if any(key.casefold().startswith(prefix) for prefix in _SENSITIVE_HEADER_PREFIXES):
+            masked[key] = f"<{len(value)} chars>"
+        else:
+            masked[key] = value
+    return masked
 
 
 class OpenAICompatibleProvider:
@@ -259,6 +277,17 @@ class OpenAICompatibleProvider:
                     headers["Authorization"] = f"Bearer {api_key}"
             _apply_session_affinity_headers(headers, session_id, session_affinity_format)
 
+            tool_count = len(payload.get("tools") or [])
+            _logger.debug(
+                "POST %s model=%s stream=%s tools=%d headers=%s payload=%s",
+                request_url,
+                payload.get("model"),
+                payload.get("stream"),
+                tool_count,
+                _mask_headers(headers),
+                dumps(payload, indent=2, ensure_ascii=False),
+            )
+
             attempt = 0
             while True:
                 parser = parser_factory()
@@ -269,6 +298,11 @@ class OpenAICompatibleProvider:
                         if response.status_code >= 400:
                             body = await response.aread()
                             body_text = body.decode(errors="replace")
+                            _logger.warning(
+                                "provider returned HTTP %d body=%s",
+                                response.status_code,
+                                body_text[:500],
+                            )
                             if self._should_retry(attempt, status_code=response.status_code):
                                 delay = retry_delay_seconds(
                                     attempt,
@@ -313,8 +347,11 @@ class OpenAICompatibleProvider:
                             if event is None:
                                 continue
 
+                            # _logger.debug("SSE chunk: %s", event)
+
                             events, stop = parser.feed(event)
                             for parser_event in events:
+                                # _logger.debug("SSE parser_event: %s", parser_event)
                                 yield parser_event
                             if stop:
                                 break
@@ -322,9 +359,14 @@ class OpenAICompatibleProvider:
                         if parser.fatal:
                             return
                         for parser_event in parser.finalize():
+                            _logger.debug(
+                                    "SSE finalize parser_event: %s",
+                                    parser_event.model_dump_json(indent=2, ensure_ascii=False),
+                                )
                             yield parser_event
                         return
                 except httpx.HTTPError as exc:
+                    _logger.warning("network error: %s: %s", type(exc).__name__, exc)
                     if not parser.emitted_content and self._should_retry(attempt):
                         delay = retry_delay_seconds(
                             attempt,

@@ -24,6 +24,7 @@ from tau_coding.commands import format_reload_summary
 from tau_coding.credentials import FileCredentialStore
 from tau_coding.extensions import StderrUiBridge
 from tau_coding.project_trust import TrustDefault, TrustOverride
+from tau_coding.logging_config import configure_debug_logging, is_debug_env_set
 from tau_coding.provider_config import (
     DEFAULT_MODEL,
     DEFAULT_PROVIDER_NAME,
@@ -310,6 +311,14 @@ def main(
         bool,
         typer.Option("--version", "-v", help="Show Tau's version and exit."),
     ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            "-d",
+            help="Enable debug logging (stderr in print mode, ~/.tau/logs/tau.log in TUI mode).",
+        ),
+    ] = False,
 ) -> None:
     """Run the Tau CLI."""
     current_version = _current_version()
@@ -349,6 +358,9 @@ def main(
         raise typer.BadParameter("-x was renamed to -e/--extension.")
 
     print_requested = print_mode or mode is not None
+
+    if debug or is_debug_env_set():
+        configure_debug_logging(tui_mode=not print_requested)
     effective_output = mode or PrintOutputMode.text
 
     if session_id is not None:

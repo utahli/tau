@@ -901,7 +901,11 @@ async def test_prompt_persists_user_assistant_and_leaf_entries(tmp_path: Path) -
     assert isinstance(entries[0], SessionInfoEntry)
     assert entries[0].cwd == str(tmp_path)
     assert entries[1] == ModelChangeEntry(
-        id=entries[1].id, parent_id=entries[0].id, model="fake", timestamp=entries[1].timestamp
+        id=entries[1].id,
+        parent_id=entries[0].id,
+        model="fake",
+        provider="openai",
+        timestamp=entries[1].timestamp,
     )
     assert entries[2] == ThinkingLevelChangeEntry(
         id=entries[2].id,
@@ -3089,6 +3093,41 @@ async def test_session_reload_refreshes_resources_and_system_prompt(tmp_path: Pa
 
 
 @pytest.mark.anyio
+async def test_session_reload_detects_disable_model_invocation_change(tmp_path: Path) -> None:
+    resource_root = tmp_path / "resources"
+    skills_dir = resource_root / "skills" / "testing"
+    skills_dir.mkdir(parents=True)
+    skill_path = skills_dir / "SKILL.md"
+    skill_path.write_text(
+        "---\ndescription: Test code\n---\n# Testing\nRun pytest.",
+        encoding="utf-8",
+    )
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=FakeProvider([]),
+            model="fake",
+            storage=storage,
+            cwd=tmp_path,
+            trust_default="always",
+            resource_paths=TauResourcePaths(root=resource_root, agents_root=None),
+        )
+    )
+    assert "<name>testing</name>" in session.system_prompt
+
+    skill_path.write_text(
+        "---\ndescription: Test code\ndisable-model-invocation: true\n---\n# Testing\nRun pytest.",
+        encoding="utf-8",
+    )
+    summary = await session.reload()
+
+    assert summary.system_prompt_rebuilt is True
+    assert "<name>testing</name>" not in session.system_prompt
+    # The skill stays loaded for explicit /skill:testing invocation.
+    assert {skill.name for skill in session.skills} == {"testing"}
+
+
+@pytest.mark.anyio
 async def test_session_reload_skips_provider_settings_refresh(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3675,6 +3714,65 @@ async def test_huggingface_session_re_resolves_pin_on_model_switch(
     assert session.model == "deepseek-ai/DeepSeek-V4-Flash"
     assert session.inference_provider == "fireworks-ai"
     assert manager.get_session(record.id).inference_provider == "fireworks-ai"  # type: ignore[union-attr]
+
+
+@pytest.mark.anyio
+async def test_startup_model_override_rebuilds_model_dependent_runtime_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    created: list[tuple[str | None, str | None]] = []
+
+    def create_provider(
+        provider_config: object,
+        *,
+        credential_store: FileCredentialStore | None = None,
+        model: str | None = None,
+        thinking_level: str | None = None,
+        inference_provider: str | None = None,
+        response_headers_observer: object | None = None,
+    ) -> SwitchableFakeProvider:
+        del credential_store, thinking_level, response_headers_observer
+        created.append((model, inference_provider))
+        return SwitchableFakeProvider(provider_config)
+
+    monkeypatch.setattr(coding_session_module, "create_model_provider", create_provider)
+    old_model = "zai-org/GLM-5.2"
+    override_model = "deepseek-ai/DeepSeek-V4-Flash"
+    provider_config = OpenAICompatibleProviderConfig(
+        name="huggingface",
+        models=(old_model, override_model),
+        default_model=old_model,
+        inference_providers={old_model: "deepinfra", override_model: "fireworks-ai"},
+    )
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    await storage.append(ModelChangeEntry(model=old_model))
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=FakeProvider([]),
+            model=override_model,
+            system="You are Tau.",
+            storage=storage,
+            cwd=tmp_path,
+            provider_name="huggingface",
+            inference_provider="fireworks-ai",
+            provider_settings=ProviderSettings(providers=(provider_config,)),
+            runtime_provider_config=provider_config,
+            resource_paths=TauResourcePaths(
+                root=tmp_path / ".tau",
+                paths=TauPaths(home=tmp_path / ".tau", agents_home=tmp_path / ".agents"),
+            ),
+        )
+    )
+
+    await session.apply_startup_model_override(override_model)
+
+    assert session.model == override_model
+    assert session.inference_provider == "fireworks-ai"
+    assert created == [
+        (old_model, "fireworks-ai"),
+        (override_model, "fireworks-ai"),
+    ]
+    assert session._harness.config.provider is session._owned_providers[-1]
 
 
 @pytest.mark.anyio

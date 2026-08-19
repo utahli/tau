@@ -38,6 +38,7 @@ def test_default_prompt_includes_tools_guidelines_date_and_cwd(tmp_path: Path) -
     assert "You are an expert coding assistant operating inside Tau" in prompt
     assert "Available tools:\n- read: Read file contents" in prompt
     assert "- Use bash for file operations like ls, rg, find" in prompt
+    assert "- When using bash, include a brief present-participle description" in prompt
     assert "- Use read to examine files instead of cat or sed." in prompt
     assert "- Inspect relevant files and project instructions before editing" in prompt
     assert "- Do not overwrite or discard unrelated user changes" in prompt
@@ -120,6 +121,29 @@ def test_skills_are_formatted_as_xml_and_escaped(tmp_path: Path) -> None:
     assert "<name>review&amp;check</name>" in formatted
     assert "<description>Review &lt;code&gt;</description>" in formatted
     assert f"<location>{skill_path}</location>" in formatted
+
+
+def test_format_skills_for_prompt_excludes_disabled_skills(tmp_path: Path) -> None:
+    visible = Skill(
+        name="visible",
+        path=tmp_path / "skills" / "visible" / "SKILL.md",
+        content="",
+        description="Visible skill",
+    )
+    hidden = Skill(
+        name="hidden",
+        path=tmp_path / "skills" / "hidden" / "SKILL.md",
+        content="",
+        description="Hidden skill",
+        disable_model_invocation=True,
+    )
+
+    formatted = format_skills_for_prompt([visible, hidden])
+
+    assert "<name>visible</name>" in formatted
+    assert "hidden" not in formatted
+
+    assert format_skills_for_prompt([hidden]) == ""
 
 
 def test_skills_are_included_only_when_read_tool_is_available(tmp_path: Path) -> None:

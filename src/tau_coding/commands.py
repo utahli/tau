@@ -109,11 +109,14 @@ class CommandResult:
     tree_picker_requested: bool = False
     login_picker_requested: bool = False
     custom_provider_login_requested: bool = False
+    local_requested: bool = False
     login_provider: str | None = None
     login_method: str | None = None
     logout_picker_requested: bool = False
     logout_provider: str | None = None
     model_picker_requested: bool = False
+    model_selection_provider: str | None = None
+    model_selection_model: str | None = None
     tools_picker_requested: bool = False
     scoped_models_picker_requested: bool = False
     skills_picker_requested: bool = False
@@ -367,6 +370,15 @@ def create_default_command_registry() -> CommandRegistry:
     )
     registry.register(
         SlashCommand(
+            name="local",
+            usage="/local",
+            description="Configure and manage local backends.",
+            handler=_local_command,
+            search_terms=("backends", "inference"),
+        )
+    )
+    registry.register(
+        SlashCommand(
             name="login",
             usage="/login [provider]",
             description="Connect a provider with OAuth or an API key.",
@@ -434,8 +446,13 @@ def _status_command(context: CommandContext) -> CommandResult:
         f"Context window: {session.context_window_tokens}",
     ]
     if session.provider_name == "huggingface":
-        route = getattr(session, "inference_provider", None) or "automatic"
-        lines.append(f"Hugging Face inference provider: {route}")
+        route = getattr(session, "inference_provider", None)
+        mode = getattr(session, "inference_provider_mode", "fixed" if route else "automatic")
+        if mode == "automatic":
+            route_status = f"automatic (currently {route})" if route else "automatic"
+        else:
+            route_status = f"{route} (fixed)" if route else "fixed"
+        lines.append(f"Hugging Face inference provider: {route_status}")
     context_window_source = getattr(session, "context_window_source", None)
     if context_window_source:
         lines.append(f"Context window source: {context_window_source}")
@@ -638,6 +655,12 @@ def _model_command(context: CommandContext) -> CommandResult:
                 message=f"Unknown model for provider {context.session.provider_name}: {model}\n"
                 f"Available models: {models}",
             )
+        if callable(getattr(context.session, "select_provider_model", None)):
+            return CommandResult(
+                handled=True,
+                model_selection_provider=context.session.provider_name,
+                model_selection_model=model,
+            )
         context.session.set_model(model)
         return CommandResult(handled=True, message=f"Current model: {model}")
 
@@ -723,6 +746,12 @@ def _theme_command(context: CommandContext) -> CommandResult:
             message=f"Unknown theme: {theme_name}\nAvailable themes: {themes}",
         )
     return CommandResult(handled=True, theme=theme_name)
+
+
+def _local_command(context: CommandContext) -> CommandResult:
+    if context.args:
+        return CommandResult(handled=True, message="Usage: /local")
+    return CommandResult(handled=True, local_requested=True)
 
 
 def _login_command(context: CommandContext) -> CommandResult:

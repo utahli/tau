@@ -11,7 +11,7 @@ command palette with **Ctrl+K**.
 | `/quit` | Exit the session |
 | `/new` | Start a new session |
 | `/session` | Show session info and stats (model, cwd, tools, skills, context) |
-| `/system` | Show the active system prompt without adding it to context or session history |
+| `/system` | Show the active system prompt with Markdown formatting without adding it to context or session history |
 | `/compact [instructions]` | Summarize and compact the active context |
 | `/export [--format html\|jsonl] [dest]` | Export the current session |
 | `/resume [session-id]` | Resume a previous session, or open the picker |
@@ -22,6 +22,7 @@ command palette with **Ctrl+K**.
 | `/scoped-models` | Choose favorite models for the Ctrl+P quick-cycle |
 | `/theme [name]` | Show or set the TUI theme |
 | `/login [provider]` | Connect a built-in provider with OAuth or an API key; Anthropic uses `anthropic-subscription` or `anthropic-api` |
+| `/local` | Choose and manage a registered local backend; interactive-only. Compatible llama.cpp routers add explicit load/unload, Hugging Face GGUF search, and server-side download actions with confirmation and reconciliation. |
 | `/logout [provider]` | Remove saved credentials for a provider |
 | `/reload` | Reload local skills, prompts, extensions, and project context |
 | `/prompts` | Search loaded prompt templates; press Enter to insert an invocation or Ctrl+E to edit the file |

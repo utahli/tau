@@ -175,7 +175,6 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
     )
     assert provider_thinking_levels(openrouter, model="openai/gpt-5.5") == (
         "off",
-        "minimal",
         "low",
         "medium",
         "high",
@@ -183,11 +182,10 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
     )
     assert provider_thinking_unavailable_reason(openrouter, model="openai/gpt-5.5") is None
     assert provider_thinking_levels(openrouter, model="anthropic/claude-sonnet-4.6") == (
-        "off",
-        "minimal",
         "low",
         "medium",
         "high",
+        "max",
     )
     assert (
         provider_thinking_unavailable_reason(openrouter, model="anthropic/claude-sonnet-4.6")
@@ -211,10 +209,10 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
     )
     assert provider_thinking_unavailable_reason(codex, model="gpt-5.5") is None
     assert provider_thinking_levels(anthropic, model="claude-sonnet-4-6") == (
-        "off",
         "low",
         "medium",
         "high",
+        "max",
     )
     assert provider_thinking_unavailable_reason(anthropic, model="claude-sonnet-4-6") is None
     assert provider_thinking_levels(anthropic, model="claude-haiku-4-5") == (
@@ -225,11 +223,11 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
         "high",
     )
     assert provider_thinking_levels(anthropic, model="claude-opus-5") == (
-        "off",
         "low",
         "medium",
         "high",
         "xhigh",
+        "max",
     )
 
 
@@ -326,6 +324,60 @@ def test_load_provider_settings_ignores_preference_without_catalog_entry(
 
     assert settings.get_provider("openai").default_model == "gpt-5-mini"
     assert "llama-cpp" not in {provider.name for provider in settings.providers}
+
+
+def test_llama_dot_cpp_and_llama_dash_cpp_are_distinct_provider_ids(tmp_path: Path) -> None:
+    tau_home = tmp_path / ".tau"
+    tau_home.mkdir()
+    (tau_home / "catalog.toml").write_text(
+        """
+schema_version = 1
+
+[[providers]]
+name = "llama.cpp"
+display_name = "llama.cpp built-in-shaped override"
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = "LLAMA_API_KEY"
+models = ["built-in-model"]
+default_model = "built-in-model"
+docs_url = "https://github.com/ggml-org/llama.cpp"
+
+[[providers]]
+name = "llama-cpp"
+display_name = "Existing custom llama.cpp"
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:8081/v1"
+api_key_env = "LEGACY_LLAMA_API_KEY"
+models = ["legacy-model"]
+default_model = "legacy-model"
+docs_url = "https://example.test/legacy-llama-cpp"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    settings = load_provider_settings(TauPaths(home=tau_home))
+    dotted = resolve_provider_selection(
+        settings,
+        provider_name="llama.cpp",
+        model="built-in-model",
+    )
+    dashed = resolve_provider_selection(
+        settings,
+        provider_name="llama-cpp",
+        model="legacy-model",
+    )
+
+    assert isinstance(dotted.provider, OpenAICompatibleProviderConfig)
+    assert dotted.provider.name == "llama.cpp"
+    assert dotted.provider.base_url == "http://127.0.0.1:8080/v1"
+    assert isinstance(dashed.provider, OpenAICompatibleProviderConfig)
+    assert dashed.provider.name == "llama-cpp"
+    assert dashed.provider.base_url == "http://127.0.0.1:8081/v1"
+    assert ScopedModelConfig(provider="llama.cpp", model="model:Q4_K_M").to_json() == {
+        "provider": "llama.cpp",
+        "model": "model:Q4_K_M",
+    }
 
 
 def test_save_provider_settings_writes_backup_when_replacing(tmp_path: Path) -> None:
@@ -969,7 +1021,7 @@ def test_openai_compatible_config_from_provider_sets_reasoning_effort(
 
 @pytest.mark.parametrize(
     ("level", "expected_effort"),
-    [("low", "low"), ("high", "high"), ("xhigh", "max")],
+    [("low", "low"), ("high", "high"), ("max", "max")],
 )
 def test_kimi_k3_maps_thinking_levels_to_reasoning_effort(
     monkeypatch: pytest.MonkeyPatch,
@@ -986,13 +1038,13 @@ def test_kimi_k3_maps_thinking_levels_to_reasoning_effort(
         thinking_level=level,
     )
 
-    assert provider_thinking_levels(provider, model="k3") == ("low", "high", "xhigh")
+    assert provider_thinking_levels(provider, model="k3") == ("low", "high", "max")
     assert config.reasoning_effort == expected_effort
 
 
 @pytest.mark.parametrize(
     ("level", "expected_effort"),
-    [("low", "low"), ("high", "high"), ("xhigh", "max")],
+    [("low", "low"), ("high", "high"), ("max", "max")],
 )
 def test_huggingface_kimi_k3_maps_thinking_levels_to_reasoning_effort(
     monkeypatch: pytest.MonkeyPatch,
@@ -1012,9 +1064,57 @@ def test_huggingface_kimi_k3_maps_thinking_levels_to_reasoning_effort(
     assert provider_thinking_levels(provider, model="moonshotai/Kimi-K3") == (
         "low",
         "high",
-        "xhigh",
+        "max",
     )
     assert config.reasoning_effort == expected_effort
+
+
+def test_huggingface_glm_5_2_does_not_send_unverified_medium_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-key")
+    provider = load_provider_settings(TauPaths(home=Path("/missing"))).get_provider("huggingface")
+
+    startup_level = resolve_startup_thinking_level(provider, "zai-org/GLM-5.2")
+    config = openai_compatible_config_from_provider(
+        provider,
+        model="zai-org/GLM-5.2",
+        thinking_level=startup_level,
+    )
+
+    assert provider_thinking_levels(provider, model="zai-org/GLM-5.2") == (
+        "off",
+        "high",
+        "max",
+    )
+    assert startup_level == "off"
+    assert config.reasoning_effort == "none"
+
+
+def test_stale_saved_glm_thinking_default_is_ignored(tmp_path: Path) -> None:
+    tau_home = tmp_path / ".tau"
+    tau_home.mkdir()
+    (tau_home / "providers.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "default_provider": "huggingface",
+                "provider_preferences": {
+                    "huggingface": {
+                        "default_model": "zai-org/GLM-5.2",
+                        "thinking_defaults": {"zai-org/GLM-5.2": "medium"},
+                    }
+                },
+                "scoped_models": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provider = load_provider_settings(TauPaths(home=tau_home)).get_provider("huggingface")
+
+    assert provider.thinking_defaults == {}
+    assert resolve_startup_thinking_level(provider, "zai-org/GLM-5.2") == "off"
 
 
 def test_openai_compatible_config_from_provider_rejects_unsupported_thinking_level(
@@ -1167,7 +1267,7 @@ def test_anthropic_config_from_provider_maps_opus_5_adaptive_thinking(
     assert medium_config.thinking_mode == "adaptive"
     assert medium_config.thinking_effort == "medium"
     assert xhigh_config.thinking_mode == "adaptive"
-    assert xhigh_config.thinking_effort == "max"
+    assert xhigh_config.thinking_effort == "xhigh"
 
 
 def test_anthropic_config_from_provider_sets_model_max_tokens(

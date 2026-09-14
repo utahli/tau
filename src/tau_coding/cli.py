@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import sys
 from collections.abc import Sequence
+from functools import partial
 from os import environ
 from pathlib import Path
 from typing import Annotated, Literal
@@ -66,6 +67,7 @@ from tau_coding.session_export import (
 from tau_coding.session_manager import CodingSessionRecord, SessionManager, validate_session_id
 from tau_coding.session_preparation import prepare_coding_session
 from tau_coding.shell_config import load_shell_settings
+from tau_coding.thinking import THINKING_LEVELS, ThinkingLevel, normalize_thinking_level
 from tau_coding.tui import run_tui_app
 from tau_coding.update_check import (
     UpdateNotice,
@@ -217,6 +219,18 @@ def main(
     model: Annotated[
         str | None,
         typer.Option("--model", "-m", help="Model name to request from the provider."),
+    ] = None,
+    thinking: Annotated[
+        str | None,
+        typer.Option(
+            "--thinking",
+            "-t",
+            help=(
+                "Initial thinking level for this run "
+                f"({', '.join(THINKING_LEVELS)}). "
+                "Overrides remembered defaults without persisting."
+            ),
+        ),
     ] = None,
     setup_base_url: Annotated[
         str,
@@ -407,6 +421,13 @@ def main(
     if extension_legacy is not None:
         raise typer.BadParameter("-x was renamed to -e/--extension.")
 
+    thinking_level_override: ThinkingLevel | None = None
+    if thinking is not None:
+        try:
+            thinking_level_override = normalize_thinking_level(thinking)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
     rpc_requested = mode is PrintOutputMode.rpc
     print_requested = print_mode or (mode is not None and not rpc_requested)
     effective_output = mode or PrintOutputMode.text
@@ -503,7 +524,12 @@ def main(
             )
         try:
             anyio.run(
-                run_openai_rpc_mode,
+                partial(
+                    run_openai_rpc_mode,
+                    thinking_level_override=thinking_level_override,
+                )
+                if thinking_level_override is not None
+                else run_openai_rpc_mode,
                 model,
                 cwd or Path.cwd(),
                 provider,
@@ -537,10 +563,15 @@ def main(
                 custom_system_prompt,
                 resolved_append_system_prompt,
             )
+            tui_runner = (
+                partial(run_openai_tui, thinking_level_override=thinking_level_override)
+                if thinking_level_override is not None
+                else run_openai_tui
+            )
             resumable_session_id = (
-                anyio.run(run_openai_tui, *tui_args)
+                anyio.run(tui_runner, *tui_args)
                 if trust_override is None
-                else anyio.run(run_openai_tui, *tui_args, trust_override)
+                else anyio.run(tui_runner, *tui_args, trust_override)
             )
         except (RuntimeError, ValueError) as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -574,13 +605,18 @@ def main(
             custom_system_prompt,
             resolved_append_system_prompt,
         )
+        print_runner = (
+            partial(run_openai_print_mode, thinking_level_override=thinking_level_override)
+            if thinking_level_override is not None
+            else run_openai_print_mode
+        )
         if session is not None:
-            ok = anyio.run(run_openai_print_mode, *print_args, trust_override, session)
+            ok = anyio.run(print_runner, *print_args, trust_override, session)
         else:
             ok = (
-                anyio.run(run_openai_print_mode, *print_args)
+                anyio.run(print_runner, *print_args)
                 if trust_override is None
-                else anyio.run(run_openai_print_mode, *print_args, trust_override)
+                else anyio.run(print_runner, *print_args, trust_override)
             )
     except (RuntimeError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -603,6 +639,8 @@ async def run_openai_tui(
     custom_system_prompt: str | None = None,
     append_system_prompt: str | None = None,
     trust_override: TrustOverride | None = None,
+    *,
+    thinking_level_override: ThinkingLevel | None = None,
 ) -> str | None:
     """Run the Textual TUI and return its resumable session id, if any."""
     release_notes_notice = startup_release_notes_notice(_current_version())
@@ -623,6 +661,7 @@ async def run_openai_tui(
         custom_system_prompt=custom_system_prompt,
         append_system_prompt=append_system_prompt,
         trust_override=trust_override,
+        thinking_level_override=thinking_level_override,
     )
 
 
@@ -896,6 +935,8 @@ async def run_openai_rpc_mode(
     custom_system_prompt: str | None = None,
     append_system_prompt: str | None = None,
     trust_override: TrustOverride | None = None,
+    *,
+    thinking_level_override: ThinkingLevel | None = None,
 ) -> None:
     """Run a persistent Pi-compatible JSONL RPC session."""
     settings = load_provider_settings()
@@ -911,11 +952,18 @@ async def run_openai_rpc_mode(
         session_id=None,
     )
     explicit_selection = provider_name is not None or model is not None
-    selection = resolve_provider_selection(
-        settings,
-        provider_name=provider_name if explicit_selection else record.provider_name,
-        model=model if explicit_selection else record.model,
-    )
+    selected_provider = provider_name if explicit_selection else record.provider_name
+    selected_model = model if explicit_selection else record.model
+    try:
+        selection = resolve_provider_selection(
+            settings, provider_name=selected_provider, model=selected_model
+        )
+    except ProviderConfigError:
+        if (selected_provider or settings.default_provider) != "openai-codex":
+            raise
+        # Bootstrap with the static default; the staged loader discovers and
+        # validates the requested/resumed live-only model before activating it.
+        selection = resolve_provider_selection(settings, provider_name="openai-codex")
     inference_provider = (
         record.inference_provider
         if resume_session_id is not None
@@ -941,12 +989,20 @@ async def run_openai_rpc_mode(
         selection.provider,
         model=selection.model,
         inference_provider=inference_provider,
-        thinking_level=resolve_startup_thinking_level(selection.provider, selection.model),
+        thinking_level=resolve_startup_thinking_level(
+            selection.provider,
+            selection.model,
+            cli_override=thinking_level_override,
+        ),
     )
     session = await CodingSession.load(
         CodingSessionConfig(
             provider=provider,
-            model=selection.model,
+            model=selected_model or selection.model,
+            requested_provider=selected_provider if explicit_selection else None,
+            requested_model=selected_model if explicit_selection else None,
+            session_provider_name=record.provider_name,
+            thinking_level_override=thinking_level_override,
             cwd=record.cwd,
             storage=jsonl_session_storage(record.path),
             session_id=record.id,
@@ -988,6 +1044,8 @@ async def run_openai_print_mode(
     append_system_prompt: str | None = None,
     trust_override: TrustOverride | None = None,
     resume_session_id: str | None = None,
+    *,
+    thinking_level_override: ThinkingLevel | None = None,
 ) -> bool:
     """Run a new or resumed print-mode turn using the configured provider."""
     settings = load_provider_settings()
@@ -1076,6 +1134,7 @@ async def run_openai_print_mode(
             thinking_level=resolve_startup_thinking_level(
                 static_selection.provider,
                 static_selection.model,
+                cli_override=thinking_level_override,
             ),
         )
         selected_provider = static_selection.provider.name
@@ -1108,6 +1167,7 @@ async def run_openai_print_mode(
             trust_default=shell_settings.default_project_trust,
             startup_model_override=False,
             inference_provider_mode=runtime_inference_mode,
+            thinking_level_override=thinking_level_override,
         )
     finally:
         # This remains the ownership path for the compatibility provider
@@ -1209,6 +1269,7 @@ async def run_print_mode(
     trust_override: TrustOverride | None = None,
     trust_default: TrustDefault = "ask",
     startup_model_override: bool = False,
+    thinking_level_override: ThinkingLevel | None = None,
 ) -> bool:
     """Run one non-interactive prompt and print streamed events.
 
@@ -1219,6 +1280,7 @@ async def run_print_mode(
         CodingSessionConfig(
             provider=provider,
             model=model,
+            thinking_level_override=thinking_level_override,
             cwd=cwd,
             storage=storage or _MemorySessionStorage(),
             resource_paths=resource_paths,
@@ -1280,6 +1342,8 @@ async def run_print_mode(
                     "The /local command is interactive-only. In print mode, configure a "
                     "backend in the TUI, then use --provider and --model."
                 )
+            if command.sidebar_toggle_requested:
+                message = "The /sidebar command is interactive-only."
             if command.reload_requested:
                 try:
                     summary = await session.reload()
@@ -1287,6 +1351,13 @@ async def run_print_mode(
                     message = f"Could not reload: {exc}"
                 else:
                     message = format_reload_summary(summary)
+            if command.session_name is not None:
+                try:
+                    renamed = await session.set_session_name(command.session_name)
+                except ValueError as exc:
+                    message = f"Could not rename session: {exc}"
+                else:
+                    message = f"Session renamed: {renamed}"
             if message:
                 typer.echo(message)
             return True

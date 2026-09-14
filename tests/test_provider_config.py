@@ -828,6 +828,63 @@ def test_resolve_startup_thinking_level_returns_none_without_levels() -> None:
     assert resolve_startup_thinking_level(provider, "qwen") is None
 
 
+def test_resolve_startup_thinking_level_cli_override_wins_over_remembered() -> None:
+    provider = _kimi_code_like_provider()
+    remembered = OpenAICompatibleProviderConfig(
+        name=provider.name,
+        models=provider.models,
+        default_model=provider.default_model,
+        thinking_levels=provider.thinking_levels,
+        thinking_default=provider.thinking_default,
+        thinking_parameter=provider.thinking_parameter,
+        thinking_defaults={"k3": "xhigh"},
+        model_metadata=provider.model_metadata,
+    )
+
+    assert resolve_startup_thinking_level(remembered, "k3", cli_override="low") == "low"
+
+
+def test_resolve_startup_thinking_level_cli_override_errors_for_unsupported() -> None:
+    provider = _kimi_code_like_provider()
+
+    # kimi-for-coding only supports "medium".
+    with pytest.raises(
+        ProviderConfigError,
+        match=r'Thinking mode "max" is not available for kimi-code:kimi-for-coding',
+    ):
+        resolve_startup_thinking_level(provider, "kimi-for-coding", cli_override="max")
+
+
+def test_resolve_startup_thinking_level_cli_override_errors_without_levels() -> None:
+    provider = OpenAICompatibleProviderConfig(
+        name="local",
+        models=("qwen",),
+        default_model="qwen",
+    )
+
+    with pytest.raises(
+        ProviderConfigError,
+        match="Thinking modes are unavailable for local:qwen",
+    ):
+        resolve_startup_thinking_level(provider, "qwen", cli_override="high")
+
+
+def test_resolve_startup_thinking_level_cli_override_none_preserves_behavior() -> None:
+    provider = _kimi_code_like_provider()
+    remembered = OpenAICompatibleProviderConfig(
+        name=provider.name,
+        models=provider.models,
+        default_model=provider.default_model,
+        thinking_levels=provider.thinking_levels,
+        thinking_default=provider.thinking_default,
+        thinking_parameter=provider.thinking_parameter,
+        thinking_defaults={"k3": "xhigh"},
+        model_metadata=provider.model_metadata,
+    )
+
+    assert resolve_startup_thinking_level(remembered, "k3", cli_override=None) == "xhigh"
+
+
 def test_resolve_provider_selection_rejects_model_not_declared_for_provider() -> None:
     settings = ProviderSettings(
         default_provider="local",
@@ -1017,6 +1074,23 @@ def test_openai_compatible_config_from_provider_sets_reasoning_effort(
 
     assert reasoner.reasoning_effort == "none"
     assert plain.reasoning_effort is None
+
+
+def test_zai_config_preserves_logical_effort_for_provider_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZAI_API_KEY", "test-key")
+    provider = load_provider_settings(TauPaths(home=Path("/missing"))).get_provider("zai")
+
+    config = openai_compatible_config_from_provider(
+        provider,
+        model="glm-5.1",
+        thinking_level="high",
+    )
+
+    assert config.reasoning_effort == "high"
+    assert config.thinking_format == "zai"
+    assert config.compat["supportsReasoningEffort"] is False
 
 
 @pytest.mark.parametrize(

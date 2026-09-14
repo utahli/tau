@@ -11,8 +11,14 @@ import pytest
 
 from pi_event_helpers import assistant_done, assistant_start
 from tau_agent import AssistantMessage, ToolCall, UserMessage
-from tau_agent.messages import AgentMessage, assistant_content
-from tau_agent.session import CustomEntry, JsonlSessionStorage, LeafEntry, MessageEntry
+from tau_agent.messages import AgentMessage, assistant_content, message_to_user
+from tau_agent.session import (
+    CustomEntry,
+    CustomMessageEntry,
+    JsonlSessionStorage,
+    LeafEntry,
+    MessageEntry,
+)
 from tau_agent.tools import AgentTool, AgentToolResult
 from tau_agent.types import JSONValue
 from tau_ai import FakeProvider
@@ -21,6 +27,8 @@ from tau_coding import (
     CodingSession,
     CodingSessionConfig,
     ResourceError,
+    SessionManager,
+    TauPaths,
     TauResourcePaths,
 )
 from tau_coding.extensions import (
@@ -119,12 +127,15 @@ class RecordingSession:
         self.inference_provider: str | None = None
         self.inference_provider_mode = "automatic"
         self.session_id = "session-1"
+        self.session_name: str | None = "Test session"
+        self.thinking_level = "medium"
         self.system_prompt = "You are Tau."
         self.is_running = running
         self.messages: tuple[AgentMessage, ...] = ()
         self.steered: list[str] = []
         self.followed_up: list[str] = []
         self.custom_entries: list[tuple[str, dict[str, JSONValue]]] = []
+        self.labels: list[tuple[str, str | None]] = []
         self.queued_custom: list[tuple[str, str | None, dict[str, JSONValue] | None]] = []
 
     def queue_steering_message(
@@ -149,6 +160,9 @@ class RecordingSession:
 
     async def append_custom_entry(self, namespace: str, data: dict[str, JSONValue]) -> None:
         self.custom_entries.append((namespace, data))
+
+    async def set_label(self, target_id: str, label: str | None) -> None:
+        self.labels.append((target_id, label))
 
     def set_inference_provider(self, route: str | None) -> str:
         self.inference_provider = route
@@ -1519,12 +1533,26 @@ async def test_append_entry_routes_to_session(tmp_path: Path) -> None:
     assert session.custom_entries == [("persister:record", {"value": 1})]
 
 
+async def test_set_label_routes_to_session(tmp_path: Path) -> None:
+    runtime = ExtensionRuntime()
+    api = _register_inline_extension(runtime, "bookmarker")
+    session = RecordingSession(tmp_path)
+    runtime.bind(session)
+
+    await api.set_label("entry-1", "checkpoint")
+    await api.set_label("entry-1", None)
+
+    assert session.labels == [("entry-1", "checkpoint"), ("entry-1", None)]
+
+
 def test_transcript_is_empty_at_session_start(tmp_path: Path) -> None:
     runtime = ExtensionRuntime()
     api = _register_inline_extension(runtime, "reader")
     session = RecordingSession(tmp_path)
     runtime.bind(session)
 
+    assert api.context.session_name == "Test session"  # type: ignore[attr-defined]
+    assert api.context.thinking_level == "medium"  # type: ignore[attr-defined]
     assert api.context.transcript == ()  # type: ignore[attr-defined]
 
 
@@ -1933,6 +1961,38 @@ def _make_tool(name: str, *, content: str) -> AgentTool:
     return AgentTool(name=name, label=name, description="d", parameters={}, execute_fn=executor)
 
 
+def test_context_paths_exposes_constructor_paths_during_extension_use(tmp_path: Path) -> None:
+    resolved = TauPaths(
+        home=tmp_path / "custom-home",
+        agents_home=tmp_path / "custom-agents",
+    )
+    runtime = ExtensionRuntime(paths=resolved)
+
+    # Constructor paths are usable before loading and remain authoritative when
+    # the resource snapshot explicitly carries the same custom paths.
+    assert runtime.paths is resolved
+    runtime.load(TauResourcePaths(root=tmp_path / "unused-root", paths=resolved))
+    api = cast(ExtensionAPI, _register_inline_extension(runtime, "reader"))
+    runtime.bind(RecordingSession(tmp_path))
+
+    assert api.context.paths is resolved
+
+
+def test_context_paths_falls_back_to_resource_root_and_agents_root(tmp_path: Path) -> None:
+    runtime = ExtensionRuntime()
+    runtime.load(
+        TauResourcePaths(
+            root=tmp_path / "home-tau",
+            agents_root=tmp_path / "home-agents",
+        )
+    )
+    api = cast(ExtensionAPI, _register_inline_extension(runtime, "reader"))
+    runtime.bind(RecordingSession(tmp_path))
+
+    assert api.context.paths.home == tmp_path / "home-tau"
+    assert api.context.paths.agents_home == tmp_path / "home-agents"
+
+
 # -- coding-session integration ---------------------------------------------------
 
 
@@ -2054,6 +2114,16 @@ async def test_session_lifecycle_recreates_built_in_in_a_fresh_generation(
     await session.aclose()
 
 
+async def test_session_exposes_extension_paths_at_moved_home(tmp_path: Path) -> None:
+    await CodingSession.load(
+        _session_config(tmp_path, FakeProvider([]), extension_body=API_CAPTURING_EXTENSION)
+    )
+    module = _loaded_extension_module("integration")
+    api = cast(ExtensionAPI, module.APIS[-1])  # type: ignore[attr-defined]
+
+    assert api.context.paths.home == tmp_path / "home-tau"
+
+
 async def test_session_exposes_extension_tools_and_commands(tmp_path: Path) -> None:
     body = HELLO_TOOL_EXTENSION + (
         "\n\ndef _cmd(args, context):\n"
@@ -2085,6 +2155,91 @@ async def test_extension_guideline_reaches_system_prompt(tmp_path: Path) -> None
     )
 
     assert "Never commit directly to main" in session.system_prompt
+
+
+async def test_session_metadata_changes_reach_extensions(tmp_path: Path) -> None:
+    config = _session_config(tmp_path, FakeProvider([]))
+    manager = SessionManager(
+        TauPaths(home=tmp_path / "manager-tau", agents_home=tmp_path / "manager-agents")
+    )
+    record = manager.create_session(cwd=config.cwd, model="fake", title="Old name")
+    session = await CodingSession.load(
+        replace(
+            config,
+            storage=JsonlSessionStorage(record.path),
+            session_id=record.id,
+            session_manager=manager,
+        )
+    )
+    api = cast(ExtensionAPI, _register_inline_extension(session.extension_runtime, "observer"))
+    seen: list[tuple[str, str | None, str | None, str, str]] = []
+
+    def record_event(event: object, context: object) -> None:
+        seen.append(
+            (
+                event.type,  # type: ignore[attr-defined]
+                getattr(event, "name", None),
+                getattr(event, "level", None),
+                context.session_name,  # type: ignore[attr-defined]
+                context.thinking_level,  # type: ignore[attr-defined]
+            )
+        )
+
+    api.on("session_info_changed", record_event)
+    api.on("thinking_level_changed", record_event)
+
+    with pytest.raises(ValueError, match="single line"):
+        await session.set_session_name("bad\nname")
+
+    assert await session.set_session_name("New name") == "New name"
+    assert await session.set_thinking_level("high") == "Thinking mode: high"
+    # Assigning either current value is a no-op and must not duplicate events.
+    assert await session.set_session_name("New name") == "New name"
+    assert await session.set_thinking_level("high") == "Thinking mode: high"
+
+    assert seen == [
+        ("session_info_changed", "New name", None, "New name", "medium"),
+        ("thinking_level_changed", None, "high", "New name", "high"),
+    ]
+    assert api.context.thinking_level == "high"
+
+
+async def test_auto_session_name_change_reaches_extensions(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Fix pane title")),
+            ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Done")),
+            ],
+        ]
+    )
+    config = _session_config(tmp_path, provider)
+    manager = SessionManager(
+        TauPaths(home=tmp_path / "manager-tau", agents_home=tmp_path / "manager-agents")
+    )
+    record = manager.create_session(cwd=config.cwd, model="fake")
+    session = await CodingSession.load(
+        replace(
+            config,
+            storage=JsonlSessionStorage(record.path),
+            session_id=record.id,
+            session_manager=manager,
+        )
+    )
+    api = cast(ExtensionAPI, _register_inline_extension(session.extension_runtime, "observer"))
+    seen: list[tuple[str | None, str | None]] = []
+    api.on(
+        "session_info_changed",
+        lambda event, context: seen.append((event.name, context.session_name)),
+    )
+
+    _ = [event async for event in session.prompt("Please fix the pane title")]
+
+    assert seen == [("Fix pane title", "Fix pane title")]
 
 
 async def test_extension_prompt_section_reaches_system_prompt_after_user_append(
@@ -2363,6 +2518,18 @@ async def test_custom_message_metadata_survives_session_reload(tmp_path: Path) -
             details={"id": "run-1"},
         )
     ]
+    entries = await session.storage.read_all()
+    persisted = [entry for entry in entries if isinstance(entry, CustomMessageEntry)]
+    assert len(persisted) == 1
+    assert persisted[0].custom_type == "subagent-notification"
+    assert not any(
+        isinstance(entry, MessageEntry) and entry.message.role == "custom" for entry in entries
+    )
+    _model, _system, sent, _tools = provider.calls[0]
+    assert message_to_user(sent[0]) == UserMessage(
+        content="<task-notification/>", timestamp=sent[0].timestamp
+    )
+
     await session.aclose()
 
     reopened = await CodingSession.load(_session_config(tmp_path, FakeProvider([])))
@@ -2781,7 +2948,13 @@ async def test_reset_for_reload_invalidates_prior_context_and_ui(tmp_path: Path)
     with pytest.raises(ExtensionError, match="stale after reload"):
         _ = context.cwd
     with pytest.raises(ExtensionError, match="stale after reload"):
+        _ = context.paths
+    with pytest.raises(ExtensionError, match="stale after reload"):
         _ = context.transcript
+    with pytest.raises(ExtensionError, match="stale after reload"):
+        _ = context.session_name
+    with pytest.raises(ExtensionError, match="stale after reload"):
+        _ = context.thinking_level
     # Trivial reads assert too (Pi asserts on everything).
     with pytest.raises(ExtensionError, match="stale after reload"):
         _ = context.has_ui

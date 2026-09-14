@@ -14,6 +14,7 @@ those locations and file formats.
 ├── catalog.toml        # optional provider/model catalog overlay
 ├── providers.json      # provider/model preferences
 ├── models-store.json   # refreshed models.dev catalog cache
+├── codex-models-store.json # account-scoped Codex model snapshot
 ├── credentials.json    # saved API keys / OAuth tokens (0600, atomic writes)
 ├── state/extensions/    # built-in integration state, including llama.cpp
 ├── settings.json       # general settings (trust default, shell prefix)
@@ -48,6 +49,11 @@ bundled snapshot. `/model` refreshes it in the background at most every four
 hours; `tau update --models` forces revalidation. Set `TAU_OFFLINE=1` to disable
 catalog network access. User `catalog.toml` overrides still apply after the cache.
 
+`codex-models-store.json` contains only parsed model metadata and the active
+Codex account ID. Tau loads it at startup, then refreshes it when `/model` or
+`/scoped-models` opens; a snapshot from a different account is ignored. It never
+contains OAuth tokens.
+
 ## System prompt files
 
 Tau can replace or extend its generated system prompt with Tau-native Markdown
@@ -60,17 +66,19 @@ files:
 <project>/.tau/APPEND_SYSTEM.md  # project append
 ```
 
-For each kind, precedence is explicit CLI input, then the project file, then the
-user file. A higher-precedence append file replaces the lower-precedence append
-file; Tau does not concatenate project and user files. Replacement content still
-receives the selected append text, project instructions, eligible skills, the
-current date, and the working directory. Empty files are valid explicit values.
+Replacement inputs use precedence: explicit CLI input, then the project
+`SYSTEM.md`, then the user `SYSTEM.md`. Append inputs compose instead of
+shadowing one another: Tau adds the user `APPEND_SYSTEM.md`, then the project
+`APPEND_SYSTEM.md`, then every explicit `--append-system-prompt` value in CLI
+order. Replacement content still receives all append text, project instructions,
+eligible skills, the current date, and the working directory. Empty files are
+valid contributions.
 
 Run `/reload` after adding, changing, or removing a file. Tau rebuilds the prompt
 for the next model request without adding it to session history. `/session`
-resource diagnostics identify selected, shadowed, or CLI-overridden files. A
-selected file that cannot be inspected or decoded as UTF-8 stops startup or
-reload rather than silently falling back.
+resource diagnostics identify selected append files and selected, shadowed, or
+CLI-overridden replacement files. A selected file that cannot be inspected or
+decoded as UTF-8 stops startup or reload rather than silently falling back.
 
 System prompt files are Tau-specific and are not discovered from `.agents`.
 Project files load only after the destination cwd is trusted. User files and
@@ -308,7 +316,8 @@ Provider preferences live in `~/.tau/providers.json`:
 - The selected model must be present in that provider's `models` list. Add
   custom or local model names to `models` before using them as defaults,
   CLI/TUI selections, or scoped models.
-- `scoped_models` are favorites for the **Ctrl+P** quick-cycle.
+- `scoped_models` are favorites for the **Ctrl+P** / **Shift+Ctrl+P**
+  forward / backward quick-cycle.
 - `providers.json` uses `schema_version: 2` and stores preferences only. Provider
   capabilities—model lists, context windows, transports, metadata, and thinking
   support—always come from the current effective catalog.
@@ -379,11 +388,13 @@ The built-in frontend reads optional settings from `~/.tau/tui.json`:
     "command_palette": "ctrl+k",
     "session_picker": "ctrl+r",
     "queue_follow_up": "alt+enter",
+    "insert_newline": "shift+enter",
     "accept_completion": "tab",
     "completion_next": "down",
     "completion_previous": "up",
     "thinking_cycle": "shift+tab",
     "model_cycle": "ctrl+p",
+    "model_cycle_reverse": "ctrl+shift+p",
     "toggle_thinking": "ctrl+t",
     "toggle_tool_results": "ctrl+o",
     "copy_message": "ctrl+c",
@@ -405,7 +416,10 @@ Tau rejects invalid values, empty keys, and duplicate assignments.
 
 - `sidebar_position`: `"right"` (default), `"left"`, or `"off"`. Controls
   placement of the session metadata sidebar. `"off"` hides the sidebar entirely;
-  the compact session info row below the prompt still works.
+  the compact session info row below the prompt still works. In a running TUI,
+  `/sidebar` temporarily toggles visibility without writing this setting; a
+  temporarily shown `"off"` sidebar uses the default right position and the
+  saved setting is honored again after restart.
 - `turn_notification`: `"desktop"` (default), `"bell"`, or `"off"`. When Tau's
   terminal surface is unfocused and the agent becomes fully idle, `"desktop"`
   selects OSC 9 for Ghostty, iTerm2, and MinTTY, or Kitty's OSC 99 protocol for
@@ -424,8 +438,12 @@ Full list in [Keyboard shortcuts]({{< relref "./keybindings.md" >}}).
 ```
 
 Each working directory gets its own subdirectory; transcripts are append-only
-JSONL preserving messages, model changes, and the active leaf of the session
-tree. Metadata is indexed per project. See the
+JSONL preserving messages and state changes. The last non-legacy-leaf entry in
+file order is the active session-tree tip; historical `leaf` records remain
+readable but are ignored. Per-entry bookmarks are append-only `label` changes
+with `target_id` and an optional `label`; the latest change per target wins and
+`null`/empty clears it. Session display names remain `session_info.title`.
+Metadata is indexed per project. See the
 [Sessions guide]({{< relref "../guides/sessions.md" >}}).
 
 ## Skills, prompts & project context

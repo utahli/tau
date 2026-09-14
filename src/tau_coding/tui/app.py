@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
@@ -17,6 +18,7 @@ from typing import Any, ClassVar, Literal, Protocol, TypeVar, cast
 from rich.console import Console, Group
 from rich.style import Style
 from rich.text import Text
+from textual import constants as textual_constants
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingsMap
@@ -33,6 +35,7 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    OptionList,
     Static,
     TextArea,
 )
@@ -62,6 +65,7 @@ from tau_agent.provider_events import (
     AssistantMessageEvent,
     TextDeltaEvent,
     ThinkingDeltaEvent,
+    ThinkingEndEvent,
 )
 from tau_agent.tools import AgentTool
 from tau_agent.types import JSONValue
@@ -139,9 +143,11 @@ from tau_coding.session_manager import CodingSessionRecord, SessionManager
 from tau_coding.session_preparation import prepare_coding_session
 from tau_coding.shell_config import load_shell_settings
 from tau_coding.skills import Skill
+from tau_coding.thinking import ThinkingLevel
 from tau_coding.tui.adapter import TuiEventAdapter
 from tau_coding.tui.autocomplete import (
     CompletionItem,
+    CompletionKind,
     CompletionOption,
     CompletionState,
     build_completion_state,
@@ -196,11 +202,20 @@ COMPLETION_MAX_VISIBLE_LINES = 16
 COMPLETION_INITIAL_TERMINAL_FRACTION = 3
 COMPLETION_MIN_TRANSCRIPT_LINES = 4
 COMPLETION_WIDGET_CHROME_LINES = 3
-PROMPT_PLACEHOLDER = "Ask Tau…  Enter submits, Shift+Enter inserts a newline"
 NO_STORED_CREDENTIALS_MESSAGE = (
     "No stored credentials to remove. /logout only removes credentials saved by /login; "
     "environment variables and providers.json config are unchanged."
 )
+
+
+def _configure_herdr_textual_mouse() -> None:
+    """Keep Textual on cell mouse coordinates inside affected Herdr versions."""
+    if os.environ.get("HERDR_ENV") != "1" or "TEXTUAL_SMOOTH_SCROLL" in os.environ:
+        return
+    os.environ["TEXTUAL_SMOOTH_SCROLL"] = "0"
+    # Textual reads this environment variable while importing constants, before
+    # Tau reaches the TUI runner. Update the loaded value for this process too.
+    textual_constants.SMOOTH_SCROLL = False  # type: ignore[misc]
 
 
 class LoginRequiredProvider:
@@ -504,6 +519,8 @@ class CompletionActionTarget(Protocol):
 
     def action_cycle_model(self) -> None: ...
 
+    def action_cycle_model_reverse(self) -> None: ...
+
     def action_toggle_tool_results(self) -> None: ...
 
     def action_toggle_thinking(self) -> None: ...
@@ -544,12 +561,15 @@ class PromptInput(TextArea):
         super().__init__(**kwargs)
         self.tui_keybindings = tui_keybindings or TuiKeybindings()
         self._base_bindings = self._bindings.copy()
-        self._footer_mode: Literal["normal", "completion", "running"] = "normal"
+        self._footer_mode: Literal["normal", "completion", "file_completion", "running"] = "normal"
         self._pending_pastes: list[tuple[str, str]] = []
         self._paste_placeholder_counter = 0
         self._apply_prompt_bindings()
 
-    def set_footer_mode(self, mode: Literal["normal", "completion", "running"]) -> None:
+    def set_footer_mode(
+        self,
+        mode: Literal["normal", "completion", "file_completion", "running"],
+    ) -> None:
         """Switch the prompt bindings shown by Textual's built-in footer."""
         if mode == self._footer_mode:
             return
@@ -625,8 +645,12 @@ class PromptInput(TextArea):
         self._completion_target().action_cycle_thinking()
 
     def action_cycle_model(self) -> None:
-        """Cycle the app-level scoped model."""
+        """Cycle the app-level scoped model forward."""
         self._completion_target().action_cycle_model()
+
+    def action_cycle_model_reverse(self) -> None:
+        """Cycle the app-level scoped model backward."""
+        self._completion_target().action_cycle_model_reverse()
 
     def action_toggle_tool_results(self) -> None:
         """Toggle app-level tool result display."""
@@ -794,7 +818,7 @@ class PromptInput(TextArea):
             event.stop()
             event.prevent_default()
             await self._completion_target().action_submit_prompt()
-        elif event.key == "shift+enter":
+        elif event.key == keybindings.insert_newline:
             event.stop()
             event.prevent_default()
             self.insert("\n")
@@ -816,6 +840,9 @@ class PromptInput(TextArea):
         elif event.key == keybindings.model_cycle:
             event.stop()
             self._completion_target().action_cycle_model()
+        elif event.key == keybindings.model_cycle_reverse:
+            event.stop()
+            self._completion_target().action_cycle_model_reverse()
         elif event.key == keybindings.toggle_tool_results:
             event.stop()
             self._completion_target().action_toggle_tool_results()
@@ -1005,17 +1032,29 @@ class ExtensionInputScreen(ModalScreen[str | None]):
 
     BINDINGS: ClassVar[list[BindingEntry]] = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, title: str, placeholder: str = "", *, theme: TuiTheme) -> None:
+    def __init__(
+        self,
+        title: str,
+        placeholder: str = "",
+        *,
+        theme: TuiTheme,
+        value: str = "",
+    ) -> None:
         super().__init__()
         self.title_text = title
         self.placeholder = placeholder
         self.theme = theme
+        self.value = value
 
     def compose(self) -> ComposeResult:
         """Compose the text prompt."""
         with Vertical(id="extension-input"):
             yield Static(self.title_text, id="extension-input-title", markup=False)
-            yield Input(placeholder=self.placeholder, id="extension-input-field")
+            yield Input(
+                value=self.value,
+                placeholder=self.placeholder,
+                id="extension-input-field",
+            )
             yield Static("Enter submits - Escape cancels", id="extension-input-help")
 
     def on_mount(self) -> None:
@@ -1237,6 +1276,13 @@ class SessionPickerSearchInput(Input):
             event.stop()
             event.prevent_default()
             self.action_cursor_down()
+        elif event.key in {"left", "right"} and isinstance(self.screen, SessionPickerScreen):
+            event.stop()
+            event.prevent_default()
+            if event.key == "left":
+                self.screen.action_focus_projects()
+            else:
+                self.screen.action_focus_sessions()
         elif event.key == "escape":
             event.stop()
             event.prevent_default()
@@ -1397,52 +1443,130 @@ class PromptTemplateEditorScreen(ModalScreen[str | None]):
 
 
 class SessionPickerScreen(ModalScreen[str | None]):
-    """Minimal modal picker for indexed sessions, with a search field."""
+    """Project-and-session navigator for indexed sessions."""
 
     BINDINGS: ClassVar[list[BindingEntry]] = [
         Binding("escape", "cancel", "Cancel"),
         Binding("up", "cursor_up", "Up", show=False),
         Binding("down", "cursor_down", "Down", show=False),
+        Binding("left", "focus_projects", "Projects", show=False),
+        Binding("right", "focus_sessions", "Sessions", show=False),
         Binding("enter", "select_cursor", "Select", show=False),
     ]
+
+    CSS = """
+    #session-picker {
+        width: 110;
+        max-width: 94%;
+        height: auto;
+        max-height: 85%;
+    }
+
+    #session-picker-columns {
+        height: auto;
+    }
+
+    .session-picker-column {
+        height: auto;
+        border: tall $tau-border;
+        background: $tau-transcript-background;
+    }
+
+    .session-picker-column.-active-column {
+        border: tall $tau-accent;
+    }
+
+    #session-picker-project-column {
+        width: 34;
+        margin-right: 1;
+    }
+
+    #session-picker-session-column {
+        width: 1fr;
+    }
+
+    .session-picker-column-title {
+        height: 1;
+        padding: 0 1;
+        color: $tau-muted-text;
+        text-style: bold;
+    }
+
+    .-active-column > .session-picker-column-title {
+        color: $tau-accent;
+    }
+
+    #session-picker-project-list,
+    #session-picker-list {
+        height: auto;
+        max-height: 16;
+        border: none;
+        background: $tau-transcript-background;
+    }
+
+    #session-picker-list {
+        padding: 0 1;
+    }
+    """
 
     def __init__(
         self,
         records: Sequence[SessionCompletionRecord],
         *,
+        local_cwd: Path,
         theme: TuiTheme,
+        loading_other_projects: bool = False,
+        current_project_loaded: bool = True,
     ) -> None:
         super().__init__()
         self.records = tuple(records)
-        self.visible_records = self.records
+        self.local_cwd = local_cwd.resolve()
         self.theme = theme
         self.search_value = ""
+        self.active_column: Literal["projects", "sessions"] = "sessions"
+        self.records_by_project = self._group_records_by_project()
+        self.project_cwds = tuple(self.records_by_project)
+        self.selected_project_index = 0
+        self.visible_records: tuple[SessionCompletionRecord, ...] = ()
+        self.loading_other_projects = loading_other_projects
+        self.current_project_loaded = current_project_loaded
 
     def compose(self) -> ComposeResult:
-        """Compose the session picker."""
+        """Compose project and session columns under one search field."""
         with Vertical(id="session-picker"):
             yield Static("Sessions", id="session-picker-title")
             yield SessionPickerSearchInput(
-                placeholder="Search sessions",
+                placeholder="Search sessions in selected project",
                 id="session-picker-search",
             )
-            yield ListView(
-                *[
-                    ListItem(Label(_session_picker_label(record), markup=False))
-                    for record in self.records
-                ],
-                id="session-picker-list",
-            )
-            yield Static("Enter selects - Escape closes", id="session-picker-help")
+            with Horizontal(id="session-picker-columns"):
+                with Vertical(
+                    id="session-picker-project-column",
+                    classes="session-picker-column",
+                ):
+                    yield Static("Projects", classes="session-picker-column-title")
+                    yield OptionList(id="session-picker-project-list", markup=False, compact=True)
+                with Vertical(
+                    id="session-picker-session-column",
+                    classes="session-picker-column -active-column",
+                ):
+                    yield Static(
+                        "",
+                        id="session-picker-session-title",
+                        classes="session-picker-column-title",
+                    )
+                    yield OptionList(id="session-picker-list", markup=False, compact=True)
+            yield Static("", id="session-picker-help")
 
     def on_mount(self) -> None:
-        """Focus the search field for keyboard navigation."""
-        search = self.query_one("#session-picker-search", Input)
-        search.focus()
+        """Start in the current project's recent-session column."""
+        self.query_one("#session-picker-search", Input).focus()
+        self._refresh_project_list()
         self._refresh_session_list()
+        self._update_help()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Filter session choices as the search value changes."""
+        """Filter sessions in the selected project."""
         if event.input.id != "session-picker-search":
             return
         event.stop()
@@ -1450,71 +1574,169 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._refresh_session_list()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Select the highlighted session from the search field."""
         if event.input.id != "session-picker-search":
             return
         event.stop()
-        self._select_visible_record()
+        self.action_select_cursor()
 
     def on_key(self, event: Key) -> None:
-        """Route session picker keys to the list."""
-        if event.key == "up":
+        """Route navigation while keeping typing focus in the search field."""
+        actions = {
+            "up": self.action_cursor_up,
+            "down": self.action_cursor_down,
+            "left": self.action_focus_projects,
+            "right": self.action_focus_sessions,
+            "enter": self.action_select_cursor,
+        }
+        action = actions.get(event.key)
+        if action is not None:
             event.stop()
-            self.action_cursor_up()
-        elif event.key == "down":
-            event.stop()
-            self.action_cursor_down()
-        elif event.key == "enter":
-            event.stop()
-            self.action_select_cursor()
+            action()
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Dismiss with the selected session id."""
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        """Show sessions for the highlighted project immediately."""
+        if event.option_list.id != "session-picker-project-list":
+            return
+        index = event.option_index
+        if index == self.selected_project_index:
+            return
+        self.selected_project_index = index
+        self._refresh_session_list()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
+        if event.option_list.id == "session-picker-project-list":
+            self.selected_project_index = event.option_index
+            self._refresh_session_list()
+            self.action_focus_sessions()
+            return
         self._select_visible_record()
 
     def action_cursor_up(self) -> None:
-        """Move to the previous session."""
-        self.query_one("#session-picker-list", ListView).action_cursor_up()
+        self._active_list().action_cursor_up()
 
     def action_cursor_down(self) -> None:
-        """Move to the next session."""
-        self.query_one("#session-picker-list", ListView).action_cursor_down()
+        self._active_list().action_cursor_down()
+
+    def action_focus_projects(self) -> None:
+        self._set_active_column("projects")
+
+    def action_focus_sessions(self) -> None:
+        self._set_active_column("sessions")
 
     def action_select_cursor(self) -> None:
-        """Select the highlighted session."""
-        self._select_visible_record()
+        if self.active_column == "projects":
+            self.action_focus_sessions()
+        else:
+            self._select_visible_record()
 
     def action_cancel(self) -> None:
-        """Close the picker without selecting a session."""
         self.dismiss(None)
 
+    def update_records(
+        self,
+        records: Sequence[SessionCompletionRecord],
+        *,
+        loading_other_projects: bool = False,
+    ) -> None:
+        """Replace records after background loading while preserving navigation."""
+        selected_cwd = self.project_cwds[self.selected_project_index]
+        session_list = self.query_one("#session-picker-list", OptionList)
+        selected_session_id = None
+        if session_list.highlighted is not None and session_list.highlighted < len(
+            self.visible_records
+        ):
+            selected_session_id = self.visible_records[session_list.highlighted].id
+
+        self.records = tuple(records)
+        self.records_by_project = self._group_records_by_project()
+        self.project_cwds = tuple(self.records_by_project)
+        try:
+            self.selected_project_index = self.project_cwds.index(selected_cwd)
+        except ValueError:
+            self.selected_project_index = 0
+        self.loading_other_projects = loading_other_projects
+        self.current_project_loaded = True
+        self._refresh_project_list()
+        self._refresh_session_list()
+
+        if selected_session_id is not None:
+            for index, record in enumerate(self.visible_records):
+                if record.id == selected_session_id:
+                    session_list.highlighted = index
+                    break
+
+    def finish_loading(self) -> None:
+        """Remove the loading state when a background refresh fails."""
+        self.loading_other_projects = False
+        self._update_help()
+
+    def _active_list(self) -> OptionList:
+        selector = (
+            "#session-picker-project-list"
+            if self.active_column == "projects"
+            else "#session-picker-list"
+        )
+        return self.query_one(selector, OptionList)
+
+    def _set_active_column(self, column: Literal["projects", "sessions"]) -> None:
+        self.active_column = column
+        projects = self.query_one("#session-picker-project-column", Vertical)
+        sessions = self.query_one("#session-picker-session-column", Vertical)
+        projects.set_class(column == "projects", "-active-column")
+        sessions.set_class(column == "sessions", "-active-column")
+        self._update_help()
+
     def _select_visible_record(self) -> None:
-        if not self.visible_records:
-            return
-        session_list = self.query_one("#session-picker-list", ListView)
-        index = session_list.index
-        if index is None:
-            return
-        self.dismiss(self.visible_records[index].id)
+        index = self.query_one("#session-picker-list", OptionList).highlighted
+        if index is not None and index < len(self.visible_records):
+            self.dismiss(self.visible_records[index].id)
+
+    def _group_records_by_project(
+        self,
+    ) -> dict[Path, tuple[SessionCompletionRecord, ...]]:
+        """Group records once so picker refreshes stay linear in history size."""
+        grouped: dict[Path, list[SessionCompletionRecord]] = {self.local_cwd: []}
+        for record in self.records:
+            grouped.setdefault(Path(record.cwd).resolve(), []).append(record)
+        return {cwd: tuple(records) for cwd, records in grouped.items()}
+
+    def _refresh_project_list(self) -> None:
+        project_list = self.query_one("#session-picker-project-list", OptionList)
+        items: list[str] = []
+        for cwd in self.project_cwds:
+            count = len(self.records_by_project[cwd])
+            marker = "● " if cwd == self.local_cwd else "  "
+            noun = "session" if count == 1 else "sessions"
+            folder_name = cwd.name or str(cwd)
+            items.append(f"{marker}{folder_name}  {count} {noun}")
+        project_list.set_options(items)
+        project_list.highlighted = self.selected_project_index
 
     def _refresh_session_list(self) -> None:
-        self.visible_records = _filter_session_records(self.records, self.search_value)
-        session_list = self.query_one("#session-picker-list", ListView)
-        session_list.clear()
-        session_list.extend(
-            [
-                ListItem(Label(_session_picker_label(record), markup=False))
-                for record in self.visible_records
-            ]
+        selected_cwd = self.project_cwds[self.selected_project_index]
+        self.query_one("#session-picker-session-title", Static).update(
+            f"Recent sessions — {selected_cwd}"
         )
-        session_list.index = 0 if self.visible_records else None
-        help_text = (
-            "Enter selects - Escape closes"
-            if self.visible_records
-            else "No matching sessions - Escape closes"
-        )
-        self.query_one("#session-picker-help", Static).update(help_text)
+        project_records = self.records_by_project[selected_cwd]
+        self.visible_records = _filter_session_records(project_records, self.search_value)
+        session_list = self.query_one("#session-picker-list", OptionList)
+        session_list.set_options(_session_picker_label(record) for record in self.visible_records)
+        session_list.highlighted = 0 if self.visible_records else None
+        self._update_help()
+
+    def _update_help(self) -> None:
+        if self.loading_other_projects and not self.current_project_loaded:
+            text = "Loading sessions… - Escape closes"
+        elif self.loading_other_projects:
+            text = "Loading other projects… - Current sessions are ready - Escape closes"
+        elif not self.visible_records and self.active_column == "sessions":
+            text = "No matching sessions - Left selects a project - Escape closes"
+        elif self.active_column == "projects":
+            text = "Up/Down selects project - Right opens sessions - Escape closes"
+        else:
+            text = "Left selects project - Up/Down navigates - Enter resumes - Escape closes"
+        self.query_one("#session-picker-help", Static).update(text)
 
 
 class SkillPickerSearchInput(Input):
@@ -1709,16 +1931,37 @@ class TreePickerResult:
 class _TreePickerListItem(ListItem):
     """Tree entry that keeps inline label colors readable when highlighted."""
 
-    def __init__(self, choice: SessionTreeChoice, *, theme: TuiTheme) -> None:
+    def __init__(
+        self,
+        choice: SessionTreeChoice,
+        *,
+        theme: TuiTheme,
+        show_label_timestamp: bool = False,
+    ) -> None:
         self.choice = choice
         self.theme = theme
-        super().__init__(Label(_tree_picker_label(choice, theme=theme), markup=False))
+        self.show_label_timestamp = show_label_timestamp
+        super().__init__(
+            Label(
+                _tree_picker_label(
+                    choice,
+                    theme=theme,
+                    show_label_timestamp=show_label_timestamp,
+                ),
+                markup=False,
+            )
+        )
 
     def watch_highlighted(self, value: bool) -> None:
         """Recolor inline label spans when the list highlight changes."""
         super().watch_highlighted(value)
         self.query_one(Label).update(
-            _tree_picker_label(self.choice, theme=self.theme, highlighted=value)
+            _tree_picker_label(
+                self.choice,
+                theme=self.theme,
+                highlighted=value,
+                show_label_timestamp=self.show_label_timestamp,
+            )
         )
 
 
@@ -1733,6 +1976,9 @@ class TreePickerScreen(ModalScreen[TreePickerResult | None]):
         Binding("s", "select_with_summary", "Summarize", show=False),
         Binding("c", "select_with_custom_summary", "Custom summary", show=False),
         Binding("ctrl+t", "toggle_tool_calls", "Tool calls", show=False),
+        Binding("l", "edit_label", "Label", show=False),
+        Binding("ctrl+f", "toggle_labeled_only", "Labeled", show=False),
+        Binding("ctrl+l", "toggle_label_timestamps", "Label time", show=False),
     ]
 
     def __init__(
@@ -1740,11 +1986,15 @@ class TreePickerScreen(ModalScreen[TreePickerResult | None]):
         choices: Sequence[SessionTreeChoice],
         *,
         theme: TuiTheme,
+        on_label_change: Callable[[str, str | None], Awaitable[float]] | None = None,
     ) -> None:
         super().__init__()
         self.choices = tuple(choices)
         self.theme = theme
+        self.on_label_change = on_label_change
         self.show_tool_calls = True
+        self.labeled_only = False
+        self.show_label_timestamps = False
 
     def compose(self) -> ComposeResult:
         """Compose the tree picker."""
@@ -1785,6 +2035,15 @@ class TreePickerScreen(ModalScreen[TreePickerResult | None]):
         elif event.key == "ctrl+t":
             event.stop()
             self.action_toggle_tool_calls()
+        elif event.key == "l":
+            event.stop()
+            self.action_edit_label()
+        elif event.key == "ctrl+f":
+            event.stop()
+            self.action_toggle_labeled_only()
+        elif event.key == "ctrl+l":
+            event.stop()
+            self.action_toggle_label_timestamps()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Dismiss with the selected entry id."""
@@ -1839,16 +2098,72 @@ class TreePickerScreen(ModalScreen[TreePickerResult | None]):
 
     def action_toggle_tool_calls(self) -> None:
         """Toggle tool-call entries in the tree picker."""
-        self.run_worker(self._toggle_tool_calls())
-
-    async def _toggle_tool_calls(self) -> None:
         selected_entry_id = self._selected_entry_id()
         self.show_tool_calls = not self.show_tool_calls
+        self.run_worker(self._refresh_choices(selected_entry_id=selected_entry_id))
+
+    def action_toggle_labeled_only(self) -> None:
+        """Toggle the Pi-style labeled-entry filter."""
+        selected_entry_id = self._selected_entry_id()
+        self.labeled_only = not self.labeled_only
+        self.run_worker(self._refresh_choices(selected_entry_id=selected_entry_id))
+
+    def action_toggle_label_timestamps(self) -> None:
+        """Toggle display of the latest label-change timestamp."""
+        selected_entry_id = self._selected_entry_id()
+        self.show_label_timestamps = not self.show_label_timestamps
+        self.run_worker(self._refresh_choices(selected_entry_id=selected_entry_id))
+
+    def action_edit_label(self) -> None:
+        """Open a prefilled editor; submitting an empty value clears the label."""
+        selected = self._selected_choice()
+        if selected is None:
+            return
+        self.app.push_screen(
+            ExtensionInputScreen(
+                "Label this session entry",
+                "Empty clears the label",
+                theme=self.theme,
+                value=selected.bookmark_label or "",
+            ),
+            callback=lambda value: self._handle_label_input(selected.entry_id, value),
+        )
+
+    def _handle_label_input(self, entry_id: str, value: str | None) -> None:
+        if value is None:
+            return
+        self.run_worker(self._apply_label(entry_id, value))
+
+    async def _apply_label(self, entry_id: str, value: str) -> None:
+        normalized = value.strip() or None
+        try:
+            if self.on_label_change is None:
+                raise RuntimeError("Session labels are not available.")
+            timestamp = await self.on_label_change(entry_id, normalized)
+        except Exception as exc:  # noqa: BLE001 - keep the tree open and surface persistence errors
+            self.app.notify(f"Error: {exc}", severity="error")
+            return
+        self.choices = tuple(
+            replace(
+                choice,
+                bookmark_label=normalized,
+                label_timestamp=timestamp if normalized is not None else None,
+            )
+            if choice.entry_id == entry_id
+            else choice
+            for choice in self.choices
+        )
+        await self._refresh_choices(selected_entry_id=entry_id)
+
+    async def _refresh_choices(self, *, selected_entry_id: str | None = None) -> None:
+        selected_entry_id = selected_entry_id or self._selected_entry_id()
         tree_list = self.query_one("#tree-picker-list", ListView)
         await tree_list.clear()
         await tree_list.extend(self._list_items())
         visible_choices = self._visible_choices()
-        tree_list.index = _tree_choice_index(visible_choices, selected_entry_id)
+        tree_list.index = (
+            _tree_choice_index(visible_choices, selected_entry_id) if visible_choices else None
+        )
         self.query_one("#tree-picker-help", Static).update(self._help_text())
 
     def _selected_entry_id(self) -> str | None:
@@ -1859,19 +2174,36 @@ class TreePickerScreen(ModalScreen[TreePickerResult | None]):
             return None
         return visible_choices[index].entry_id
 
+    def _selected_choice(self) -> SessionTreeChoice | None:
+        entry_id = self._selected_entry_id()
+        return next((choice for choice in self.choices if choice.entry_id == entry_id), None)
+
     def _visible_choices(self) -> tuple[SessionTreeChoice, ...]:
-        if self.show_tool_calls:
-            return self.choices
-        return tuple(choice for choice in self.choices if not choice.is_tool_call)
+        return tuple(
+            choice
+            for choice in self.choices
+            if (self.show_tool_calls or not choice.is_tool_call)
+            and (not self.labeled_only or choice.bookmark_label is not None)
+        )
 
     def _list_items(self) -> list[ListItem]:
-        return [_TreePickerListItem(choice, theme=self.theme) for choice in self._visible_choices()]
+        return [
+            _TreePickerListItem(
+                choice,
+                theme=self.theme,
+                show_label_timestamp=self.show_label_timestamps,
+            )
+            for choice in self._visible_choices()
+        ]
 
     def _help_text(self) -> str:
         tool_call_state = "shown" if self.show_tool_calls else "hidden"
+        labeled_state = "only" if self.labeled_only else "all"
+        time_state = "shown" if self.show_label_timestamps else "hidden"
         return (
-            "Enter branches - S summarizes - C custom summary - "
-            f"Ctrl+T tool calls {tool_call_state} - Escape closes"
+            "Enter branch · L label/clear · S summary · C custom · "
+            f"Ctrl+T tool calls {tool_call_state} · Ctrl+F labels {labeled_state} · "
+            f"Ctrl+L times {time_state} · Esc close"
         )
 
     def action_cancel(self) -> None:
@@ -2095,18 +2427,18 @@ class LoginProviderPickerScreen(ModalScreen[str | _LoginFlowAction | None]):
             )
             yield Static("Enter selects - Escape closes", id="login-provider-help")
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         """Focus the provider search field."""
         self.query_one("#login-provider-search", Input).focus()
-        self._refresh_provider_list()
+        await self._refresh_provider_list()
 
-    def on_input_changed(self, event: Input.Changed) -> None:
+    async def on_input_changed(self, event: Input.Changed) -> None:
         """Filter providers as the search value changes."""
         if event.input.id != "login-provider-search":
             return
         event.stop()
         self.visible_providers = _filter_login_providers(self.providers, event.value)
-        self._refresh_provider_list()
+        await self._refresh_provider_list()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Select the highlighted provider from the search field."""
@@ -2153,16 +2485,21 @@ class LoginProviderPickerScreen(ModalScreen[str | _LoginFlowAction | None]):
         self.dismiss(None)
 
     def _select_visible_provider(self) -> None:
-        provider_list = self.query_one("#login-provider-list", ListView)
-        index = provider_list.index
-        if index is None or not self.visible_providers:
+        if not self.visible_providers:
             return
-        self.dismiss(self.visible_providers[index].name)
-
-    def _refresh_provider_list(self) -> None:
         provider_list = self.query_one("#login-provider-list", ListView)
-        provider_list.clear()
-        provider_list.extend(
+        # Fall back to the first match: submitting from the search field can
+        # land here before the refreshed list has applied its highlight.
+        index = provider_list.index
+        self.dismiss(self.visible_providers[0 if index is None else index].name)
+
+    async def _refresh_provider_list(self) -> None:
+        provider_list = self.query_one("#login-provider-list", ListView)
+        # Await the mounts: assigning the index while the list is still empty
+        # validates it back to None, leaving the first provider unreachable
+        # with the down key (issue #494).
+        await provider_list.clear()
+        await provider_list.extend(
             [
                 ListItem(Label(_login_provider_label(provider), markup=False))
                 for provider in self.visible_providers
@@ -2575,8 +2912,6 @@ class ModelPickerScreen(ModalScreen[ModelChoice | None]):
 
     def action_toggle_mode(self) -> None:
         """Toggle between all models and scoped models."""
-        if self.picker_kind != "model":
-            return
         self.mode = "scoped" if self.mode == "all" else "all"
         self._refresh_model_list()
 
@@ -2649,12 +2984,23 @@ class ModelPickerScreen(ModalScreen[ModelChoice | None]):
         scope_count = len(self.scoped_choices)
         tabs = self.query_one("#model-picker-tabs", Static)
         if self.picker_kind == "scoped":
-            tabs.update("Scoped models setup — Enter toggles membership; active model is unchanged")
-            help_text = (
-                "No matching models - Enter toggles scoped model"
-                if not self.visible_choices
-                else f"Enter toggles scoped model - {scope_count} scoped"
-            )
+            if self.mode == "all":
+                tabs.update("Tabs: ● All models  ○ Scoped models")
+                help_text = (
+                    "all models: no matching models - Tab switches to scoped models"
+                    if not self.visible_choices
+                    else (
+                        "All models - Enter toggles scoped model - Tab switches tabs - "
+                        f"{scope_count} scoped - active model is unchanged"
+                    )
+                )
+            else:
+                tabs.update("Tabs: ○ All models  ● Scoped models")
+                help_text = (
+                    "scoped models: no scoped models - Tab switches to all models"
+                    if not self.visible_choices
+                    else "Scoped models - Enter removes scoped model - Tab switches tabs"
+                )
         elif self.mode == "all":
             tabs.update("Tabs: ● All models  ○ Scoped models")
             help_text = (
@@ -3315,12 +3661,28 @@ class TauTuiApp(App[None]):
         border: tall $tau-border;
     }
 
+    ListView,
+    OptionList {
+        scrollbar-background: $tau-transcript-background;
+        scrollbar-color: $tau-border;
+        scrollbar-color-hover: $tau-highlight-background;
+        scrollbar-background-hover: $tau-transcript-background;
+        scrollbar-color-active: $tau-accent;
+        scrollbar-background-active: $tau-transcript-background;
+        scrollbar-size-vertical: 2;
+    }
+
     ListView > ListItem.-highlight {
         background: $tau-highlight-background;
         color: $tau-highlight-text;
     }
 
     ListView > ListItem.-highlight Label {
+        background: $tau-highlight-background;
+        color: $tau-highlight-text;
+    }
+
+    OptionList > .option-list--option-highlighted {
         background: $tau-highlight-background;
         color: $tau-highlight-text;
     }
@@ -3352,6 +3714,10 @@ class TauTuiApp(App[None]):
         height: 1;
         margin-top: 1;
         color: $tau-muted-text;
+    }
+
+    #tree-picker-help {
+        height: auto;
     }
 
     ExtensionSelectScreen,
@@ -3785,6 +4151,9 @@ class TauTuiApp(App[None]):
         legacy_notices = (startup_notice,) if startup_notice else ()
         self.startup_notices = tuple((*startup_notices, *legacy_notices))
         self.initial_prompt = initial_prompt
+        # This override is deliberately separate from durable settings. It is
+        # reset with every app instance and never participates in tui.json.
+        self._sidebar_visibility_override: bool | None = None
         super().__init__()
         self._register_tau_textual_themes()
         # Assign the resolved theme's name: it is always registered, while the
@@ -3992,7 +4361,11 @@ class TauTuiApp(App[None]):
                 with Horizontal(id="prompt-row"):
                     yield Static("τ", id="prompt-prefix")
                     yield PromptInput(
-                        placeholder=PROMPT_PLACEHOLDER,
+                        placeholder=(
+                            "Ask Tau…  Enter submits, "
+                            f"{_key_hint(self.tui_settings.keybindings.insert_newline)} "
+                            "inserts a newline"
+                        ),
                         id="prompt",
                         tui_keybindings=self.tui_settings.keybindings,
                     )
@@ -4134,7 +4507,14 @@ class TauTuiApp(App[None]):
         self._refresh_completions()
 
     async def action_submit_prompt(self) -> None:
-        """Submit the current prompt text or slash command."""
+        """Accept a changing non-file completion, or submit the current prompt text."""
+        selected = self._completion_state.selected
+        if selected is not None and selected.kind is not CompletionKind.FILE_REFERENCE:
+            prompt = self.query_one("#prompt", PromptInput)
+            text_before_completion = prompt.text
+            self.action_accept_completion()
+            if prompt.text != text_before_completion:
+                return
         await self._submit_prompt_from_editor(streaming_behavior="steer")
 
     async def action_submit_follow_up(self) -> None:
@@ -4148,14 +4528,6 @@ class TauTuiApp(App[None]):
     ) -> None:
         prompt = self.query_one("#prompt", PromptInput)
         raw_text = prompt.text_for_submission()
-        applied_completion = self._apply_selected_completion(raw_text)
-        if applied_completion is not None and applied_completion != raw_text:
-            prompt.text = applied_completion
-            prompt._clear_pending_paste()
-            prompt.move_cursor(_text_end_location(applied_completion))
-            self._completion_state = self._build_completion_state(applied_completion)
-            self._refresh_completions()
-            return
 
         text = raw_text.strip()
         if not text:
@@ -4256,6 +4628,8 @@ class TauTuiApp(App[None]):
                 self._open_custom_provider_login()
             if command.local_requested:
                 self._open_local_backend_picker()
+            if command.sidebar_toggle_requested:
+                self._toggle_sidebar_visibility()
             if command.login_provider is not None:
                 self._open_login(command.login_provider, method=command.login_method)
             if command.logout_picker_requested:
@@ -4283,6 +4657,14 @@ class TauTuiApp(App[None]):
                 self._open_skills_picker()
             if command.theme_picker_requested:
                 self._open_theme_picker()
+            if command.session_name is not None:
+                try:
+                    await self.session.set_session_name(command.session_name)
+                except ValueError as exc:
+                    self._notify(f"Could not rename session: {exc}", severity="error")
+                    self._refresh()
+                    return
+                self._sync_session_title()
             if command.thinking_level is not None:
                 await self._set_thinking_level(command.thinking_level)
             if command.theme is not None:
@@ -4481,11 +4863,12 @@ class TauTuiApp(App[None]):
             await self._append_optimistic_user_message(message.text)
             return
         if isinstance(message, CustomMessage):
-            await self._append_optimistic_user_message(
-                message.text,
-                custom_type=message.custom_type,
-                details=message.details if isinstance(message.details, dict) else None,
-            )
+            if message.display:
+                await self._append_optimistic_user_message(
+                    message.text,
+                    custom_type=message.custom_type,
+                    details=message.details if isinstance(message.details, dict) else None,
+                )
             return
         self._refresh()
 
@@ -5343,6 +5726,8 @@ class TauTuiApp(App[None]):
             nested = event.assistant_message_event
             if isinstance(nested, TextDeltaEvent):
                 await transcript.append_assistant_delta(nested.delta, theme=theme)
+            elif isinstance(nested, ThinkingEndEvent):
+                await transcript.finish_thinking_message()
             elif isinstance(nested, ThinkingDeltaEvent):
                 await transcript.append_thinking_delta(
                     nested.delta,
@@ -5686,18 +6071,54 @@ class TauTuiApp(App[None]):
         self._refresh_completions()
 
     def action_open_session_picker(self) -> None:
-        """Open the indexed session picker."""
+        """Open local sessions immediately, then load other projects."""
         if self.state.running:
             self._notify("Tau is already working. Press Escape to cancel.")
             return
-        records = _session_records(self.session)
-        if not records:
+        if getattr(self.session, "session_manager", None) is None:
             self._notify("No sessions found.")
             return
-        self.push_screen(
-            SessionPickerScreen(records, theme=self.tui_settings.resolved_theme),
-            callback=self._handle_session_picker_result,
+        picker = SessionPickerScreen(
+            (),
+            local_cwd=Path(self.session.cwd),
+            theme=self.tui_settings.resolved_theme,
+            loading_other_projects=True,
+            current_project_loaded=False,
         )
+        self.push_screen(picker, callback=self._handle_session_picker_result)
+        self.run_worker(self._refresh_open_session_picker(picker), exclusive=False)
+
+    async def _refresh_open_session_picker(self, picker: SessionPickerScreen) -> None:
+        """Load session indexes without blocking Textual's event loop."""
+        try:
+            local_records = await asyncio.to_thread(_local_session_records, self.session)
+        except Exception as exc:  # noqa: BLE001 - still attempt the global index
+            if self.screen is picker:
+                self._notify(f"Could not load current project sessions: {exc}", severity="warning")
+        else:
+            if not await self._wait_for_open_session_picker(picker):
+                return
+            picker.update_records(local_records, loading_other_projects=True)
+
+        try:
+            records = await asyncio.to_thread(_session_records, self.session)
+        except Exception as exc:  # noqa: BLE001 - keep local sessions usable
+            if self.screen is picker:
+                picker.finish_loading()
+                self._notify(f"Could not load other projects: {exc}", severity="warning")
+            return
+        if await self._wait_for_open_session_picker(picker):
+            picker.update_records(records)
+
+    async def _wait_for_open_session_picker(self, picker: SessionPickerScreen) -> bool:
+        """Wait until this picker is mounted, or report that it was closed."""
+        if self.screen is not picker:
+            return False
+        while not picker.is_mounted:
+            await asyncio.sleep(0)
+            if self.screen is not picker:
+                return False
+        return True
 
     def _open_prompt_template_picker(self) -> None:
         self.push_screen(
@@ -5788,11 +6209,18 @@ class TauTuiApp(App[None]):
         self.run_worker(self._cycle_thinking_level(), exclusive=False)
 
     def action_cycle_model(self) -> None:
-        """Cycle through scoped models."""
+        """Cycle forward through scoped models."""
+        self._cycle_model(reverse=False)
+
+    def action_cycle_model_reverse(self) -> None:
+        """Cycle backward through scoped models."""
+        self._cycle_model(reverse=True)
+
+    def _cycle_model(self, *, reverse: bool) -> None:
         if self.state.running:
             self._notify("Tau is already working. Press Escape to cancel.")
             return
-        self.run_worker(self._cycle_scoped_model(), exclusive=False)
+        self.run_worker(self._cycle_scoped_model(reverse=reverse), exclusive=False)
 
     def action_toggle_tool_results(self) -> None:
         """Toggle inline tool result details without rebuilding unrelated history."""
@@ -5822,11 +6250,15 @@ class TauTuiApp(App[None]):
 
     async def _resume_session(self, session_id: str) -> None:
         try:
+            previous_cwd = Path(self.session.cwd).resolve()
             resume_message = await self.session.resume(session_id)
             self._reload_session_themes()
             self.state.clear()
             self.state.set_skills(self.session.skills)
             self._load_session_messages_from_session()
+            current_cwd = Path(self.session.cwd).resolve()
+            if current_cwd != previous_cwd:
+                resume_message = f"{resume_message} ({_short_path(current_cwd)})"
             self._notify(resume_message)
         except Exception as exc:  # noqa: BLE001 - surface command failures in the TUI
             self._notify(f"Error: {exc}", severity="error")
@@ -5849,9 +6281,23 @@ class TauTuiApp(App[None]):
             self._notify("No session entries are available for branching.", severity="warning")
             return
         self.push_screen(
-            TreePickerScreen(choices, theme=self.tui_settings.resolved_theme),
+            TreePickerScreen(
+                choices,
+                theme=self.tui_settings.resolved_theme,
+                on_label_change=self._set_tree_label,
+            ),
             callback=self._handle_tree_picker_result,
         )
+
+    async def _set_tree_label(self, entry_id: str, label: str | None) -> float:
+        set_label = getattr(self.session, "set_label", None)
+        if set_label is None:
+            raise RuntimeError("Session labels are not available.")
+        entry = set_label(entry_id, label)
+        if isawaitable(entry):
+            entry = await entry
+        self._notify("Label cleared." if label is None else f"Label set to [{label}].")
+        return float(entry.timestamp)
 
     def _handle_tree_picker_result(self, result: TreePickerResult | None) -> None:
         if result is None:
@@ -6353,6 +6799,7 @@ class TauTuiApp(App[None]):
             ),
             callback=self._handle_scoped_models_picker_result,
         )
+        self.run_worker(self._refresh_open_model_picker(), exclusive=False)
 
     def _toggle_scoped_model(self, choice: ModelChoice) -> Sequence[ModelChoice]:
         toggle_scoped_model = getattr(self.session, "toggle_scoped_model", None)
@@ -6437,13 +6884,13 @@ class TauTuiApp(App[None]):
             return
         self._refresh_chrome()
 
-    async def _cycle_scoped_model(self) -> None:
+    async def _cycle_scoped_model(self, *, reverse: bool = False) -> None:
         cycler = getattr(self.session, "cycle_scoped_model", None)
         if cycler is None:
             self._notify("Scoped model controls are not available.", severity="warning")
             return
         try:
-            result = cycler()
+            result = cycler(reverse=reverse)
             if isawaitable(result):
                 result = await result
         except Exception as exc:  # noqa: BLE001 - surface session state failures in the TUI
@@ -6676,17 +7123,30 @@ class TauTuiApp(App[None]):
         )
 
     def _update_responsive_layout(self, width: int, height: int) -> None:
-        if self.tui_settings.sidebar_position == "off":
-            return
-        show_sidebar = width >= SIDEBAR_MIN_WIDTH and height >= SIDEBAR_MIN_HEIGHT
+        if self._sidebar_visibility_override is not None:
+            show_sidebar = self._sidebar_visibility_override
+        elif self.tui_settings.sidebar_position == "off":
+            show_sidebar = False
+        else:
+            show_sidebar = width >= SIDEBAR_MIN_WIDTH and height >= SIDEBAR_MIN_HEIGHT
         self.set_class(not show_sidebar, "-hide-sidebar")
 
     def _apply_sidebar_position(self) -> None:
-        """Apply CSS classes for the configured sidebar position."""
+        """Apply the configured (or off-setting fallback) sidebar position."""
         pos = self.tui_settings.sidebar_position
-        self.set_class(pos == "right", "-sidebar-right")
-        if pos == "off":
-            self.add_class("-hide-sidebar")
+        # A configured ``off`` has no prior visible position, so an explicit
+        # session-only show uses the normal right-hand placement.
+        show_right = pos == "right" or (pos == "off" and self._sidebar_visibility_override is True)
+        self.set_class(show_right, "-sidebar-right")
+
+    def _toggle_sidebar_visibility(self) -> None:
+        """Toggle sidebar visibility without changing durable TUI settings."""
+        currently_visible = not self.has_class("-hide-sidebar")
+        self._sidebar_visibility_override = not currently_visible
+        self._apply_sidebar_position()
+        self._update_responsive_layout(self.size.width, self.size.height)
+        state = "shown" if self._sidebar_visibility_override else "hidden"
+        self._notify(f"Sidebar {state} for this session.")
 
     def _build_completion_state(self, text: str) -> CompletionState:
         registry = _session_command_registry(self.session)
@@ -6702,7 +7162,7 @@ class TauTuiApp(App[None]):
             ),
             thinking_levels=getattr(self.session, "available_thinking_levels", ()),
             theme_names=available_tui_theme_names(),
-            session_options=_session_options(self.session),
+            session_options=(_session_options(self.session) if text.startswith("/resume ") else ()),
             cwd=self.session.cwd,
         )
 
@@ -6958,7 +7418,8 @@ def _session_options(session: CodingSession) -> tuple[CompletionOption, ...]:
     return tuple(_session_option(record) for record in _session_records(session))
 
 
-def _session_records(session: CodingSession) -> tuple[SessionCompletionRecord, ...]:
+def _local_session_records(session: CodingSession) -> tuple[SessionCompletionRecord, ...]:
+    """Return only the current project's indexed sessions."""
     manager = getattr(session, "session_manager", None)
     if manager is None:
         return ()
@@ -6966,7 +7427,29 @@ def _session_records(session: CodingSession) -> tuple[SessionCompletionRecord, .
         records = manager.list_sessions(session.cwd)
     except TypeError:
         records = manager.list_sessions()
-    return tuple(records)
+    local_cwd = Path(session.cwd).resolve()
+    return tuple(record for record in records if Path(record.cwd).resolve() == local_cwd)
+
+
+def _session_records(session: CodingSession) -> tuple[SessionCompletionRecord, ...]:
+    """Return indexed sessions for resume, current directory first.
+
+    Sessions from the session's working directory are listed newest-first,
+    followed by sessions from every other directory (also newest-first), so a
+    session from another project is visible in the picker without leaving it.
+    """
+    manager = getattr(session, "session_manager", None)
+    if manager is None:
+        return ()
+    try:
+        records = list(manager.list_sessions())
+    except TypeError:
+        # Older managers only accept an explicit cwd argument.
+        records = list(manager.list_sessions(session.cwd))
+    local_cwd = Path(session.cwd).resolve()
+    local = [record for record in records if Path(record.cwd).resolve() == local_cwd]
+    other = [record for record in records if Path(record.cwd).resolve() != local_cwd]
+    return tuple(local) + tuple(other)
 
 
 def _session_option(record: SessionCompletionRecord) -> CompletionOption:
@@ -6980,19 +7463,22 @@ def _session_option(record: SessionCompletionRecord) -> CompletionOption:
 def _short_path(path: Path) -> str:
     home = Path.home()
     try:
-        return f"~/{path.relative_to(home)}"
+        relative = path.relative_to(home)
+        return "~" if relative == Path(".") else f"~/{relative}"
     except ValueError:
         return str(path)
 
 
 def _session_picker_label(record: SessionCompletionRecord) -> str:
+    # The project column provides directory context. Keep the model last so it
+    # truncates before the relative age and title.
     parts = [_session_updated_at_label(record.updated_at)]
-    if record.model:
-        parts.append(record.model)
     title = _named_session_title(record.title)
     if title is not None:
         parts.append(title)
-    return " - ".join(parts)
+    if record.model:
+        parts.append(record.model)
+    return "  ".join(parts)
 
 
 def _filter_session_records(
@@ -7014,6 +7500,7 @@ def _tree_picker_label(
     *,
     theme: TuiTheme,
     highlighted: bool = False,
+    show_label_timestamp: bool = False,
 ) -> Text:
     marker = "* " if choice.active else "  "
     label = choice.label
@@ -7022,6 +7509,13 @@ def _tree_picker_label(
     body = label[indent_width:]
     author, separator, rest = body.partition(":")
     text = Text(f"{marker}{indent}")
+    if choice.bookmark_label is not None:
+        bookmark_color = theme.highlight_text if highlighted else theme.success
+        text.append(f"[{choice.bookmark_label}] ", style=bookmark_color)
+        if show_label_timestamp and choice.label_timestamp is not None:
+            timestamp = datetime.fromtimestamp(choice.label_timestamp).strftime("%Y-%m-%d %H:%M")
+            timestamp_color = theme.highlight_text if highlighted else theme.muted_text
+            text.append(f"{timestamp} ", style=timestamp_color)
     if separator:
         author_color = theme.highlight_text if highlighted else theme.accent
         text.append(author, style=author_color)
@@ -7047,7 +7541,22 @@ def _tree_choice_index(choices: Sequence[SessionTreeChoice], entry_id: str | Non
 
 
 def _session_updated_at_label(timestamp: float) -> str:
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+    """Return a compact relative age label for a session (e.g. ``2h ago``)."""
+    delta = (datetime.now() - datetime.fromtimestamp(timestamp)).total_seconds()
+    minutes = int(delta // 60)
+    if minutes < 1:
+        return "now"
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days == 1:
+        return "yesterday"
+    if days < 7:
+        return f"{days}d ago"
+    return datetime.fromtimestamp(timestamp).strftime("%b %d")
 
 
 def _named_session_title(title: str | None) -> str | None:
@@ -7192,8 +7701,11 @@ def _prompt_footer_mode(
     completion_state: CompletionState,
     *,
     working: bool,
-) -> Literal["normal", "completion", "running"]:
-    if completion_state.items:
+) -> Literal["normal", "completion", "file_completion", "running"]:
+    selected = completion_state.selected
+    if selected is not None:
+        if selected.kind is CompletionKind.FILE_REFERENCE:
+            return "file_completion"
         return "completion"
     if working:
         return "running"
@@ -7211,6 +7723,12 @@ def _app_bindings(keybindings: TuiKeybindings) -> list[Binding]:
         Binding(keybindings.session_picker, "open_session_picker", "Sessions"),
         Binding(keybindings.thinking_cycle, "cycle_thinking", "Thinking"),
         Binding(keybindings.model_cycle, "cycle_model", "Model"),
+        Binding(
+            keybindings.model_cycle_reverse,
+            "cycle_model_reverse",
+            "Previous model",
+            show=False,
+        ),
         Binding(
             keybindings.accept_completion,
             "accept_completion",
@@ -7245,15 +7763,19 @@ def _app_bindings(keybindings: TuiKeybindings) -> list[Binding]:
 def _prompt_bindings(
     keybindings: TuiKeybindings,
     *,
-    mode: Literal["normal", "completion", "running"],
+    mode: Literal["normal", "completion", "file_completion", "running"],
 ) -> list[Binding]:
-    if mode == "completion":
+    if mode in {"completion", "file_completion"}:
         bindings = [
             Binding(
                 keybindings.accept_completion,
                 "accept_completion",
                 "Complete",
-                key_display=f"{_key_hint(keybindings.accept_completion)}/Enter",
+                key_display=(
+                    _key_hint(keybindings.accept_completion)
+                    if mode == "file_completion"
+                    else f"{_key_hint(keybindings.accept_completion)}/Enter"
+                ),
                 priority=True,
             ),
             Binding(
@@ -7268,6 +7790,8 @@ def _prompt_bindings(
             ),
             Binding(keybindings.cancel, "cancel", "Close", priority=True),
         ]
+        if mode == "file_completion":
+            bindings.insert(1, Binding("enter", "submit_prompt", "Submit raw", priority=True))
         return bindings + _hidden_prompt_bindings(keybindings, visible_bindings=bindings)
     if mode == "running":
         bindings = [
@@ -7290,11 +7814,23 @@ def _prompt_bindings(
         return bindings + _hidden_prompt_bindings(keybindings, visible_bindings=bindings)
     bindings = [
         Binding("enter", "submit_prompt", "Submit", priority=True),
-        Binding("shift+enter", "insert_newline", "Newline", priority=True),
+        Binding(
+            keybindings.insert_newline,
+            "insert_newline",
+            "Newline",
+            priority=True,
+        ),
         Binding(keybindings.command_palette, "open_command_palette", "Commands", priority=True),
         Binding(keybindings.session_picker, "open_session_picker", "Sessions", priority=True),
         Binding(keybindings.thinking_cycle, "cycle_thinking", "Thinking", priority=True),
         Binding(keybindings.model_cycle, "cycle_model", "Model", priority=True),
+        Binding(
+            keybindings.model_cycle_reverse,
+            "cycle_model_reverse",
+            "Previous model",
+            show=False,
+            priority=True,
+        ),
         Binding(
             keybindings.copy_message,
             "clear_prompt",
@@ -7316,8 +7852,10 @@ def _hidden_prompt_bindings(
         (keybindings.command_palette, "open_command_palette"),
         (keybindings.session_picker, "open_session_picker"),
         (keybindings.queue_follow_up, "submit_follow_up"),
+        (keybindings.insert_newline, "insert_newline"),
         (keybindings.thinking_cycle, "cycle_thinking"),
         (keybindings.model_cycle, "cycle_model"),
+        (keybindings.model_cycle_reverse, "cycle_model_reverse"),
         (keybindings.toggle_tool_results, "toggle_tool_results"),
         (keybindings.toggle_thinking, "toggle_thinking"),
         (keybindings.copy_message, "clear_prompt"),
@@ -7585,8 +8123,10 @@ async def run_tui_app(
     custom_system_prompt: str | None = None,
     append_system_prompt: str | None = None,
     trust_override: TrustOverride | None = None,
+    thinking_level_override: ThinkingLevel | None = None,
 ) -> str | None:
     """Run the Textual app and return the active id when its session is persisted."""
+    _configure_herdr_textual_mouse()
     if new_session and session_id is not None:
         raise RuntimeError("--session and --new-session cannot be used together")
 
@@ -7654,6 +8194,7 @@ async def run_tui_app(
                 thinking_level=resolve_startup_thinking_level(
                     selection.provider,
                     selection.model,
+                    cli_override=thinking_level_override,
                 ),
             )
         except RuntimeError as exc:
@@ -7721,6 +8262,7 @@ async def run_tui_app(
                 project_extensions_enabled=project_extensions_enabled,
                 custom_system_prompt=custom_system_prompt,
                 append_system_prompt=append_system_prompt,
+                thinking_level_override=thinking_level_override,
                 trust_override=trust_override,
                 trust_default=shell_settings.default_project_trust,
                 trust_interactive=True,

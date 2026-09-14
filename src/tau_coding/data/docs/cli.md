@@ -7,8 +7,9 @@ CLI entry point is `tau_coding.cli:app`.
 
 ## Local inference
 
-`/local` is interactive-only. It opens the provider-neutral local-backend host
-in the TUI; print mode never runs setup, probes endpoints, or picks a model
+`/local` and `/sidebar` are interactive-only. `/local` opens the provider-neutral
+local-backend host in the TUI; `/sidebar` toggles the session sidebar. Print mode
+never runs setup, probes endpoints, or picks a model
 implicitly. Configure llama.cpp through `/local`, then use its exact provider
 and model explicitly in headless mode:
 
@@ -35,6 +36,10 @@ tau [OPTIONS] [PROMPT]
 - `--mode text|json|transcript`: choose print output and imply print mode.
 - `--provider NAME`: select an explicit provider.
 - `-m, --model ID`: select an explicit model.
+- `-t, --thinking LEVEL`: set the initial thinking level for this run
+  (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Overrides
+  remembered and catalog defaults without persisting them; an unsupported level
+  for the selected model is an error listing the available modes.
 - `--session ID`: resume a session in the TUI or print mode.
 - `--cwd PATH`: set the coding-session working directory.
 - `-e, --extension PATH`: load an explicit extension.

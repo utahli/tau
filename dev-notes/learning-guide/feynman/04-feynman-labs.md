@@ -1,126 +1,132 @@
-# 04：会话模块费曼实验室
+# 04：费曼实验室——先猜，再看代码
 
-先口述再验证。以下练习均不要求改源码；用现有 fake provider 与测试即可。每题的完成标准是
-能向不会 Python 的人解释因果，而不是复述函数名。
+每个实验都按四步进行：
 
-## 实验 1：手算一个 session tree
+1. 不看实现，先写下预测；
+2. 用日常语言解释“为什么”；
+3. 打开指定源码核对；
+4. 运行测试，把预测改成准确结论。
 
-在纸上创建以下 entry（用 `X -> Y` 表示 `Y.parent_id == X.id`）：
+这些练习不要求改源码。
+
+## 实验 1：画出第一棵树
+
+在纸上写：
 
 ```text
 Info -> Model -> Think -> U1 -> Leaf(U1)
-                      \-> A1 -> Leaf(A1)
+                      \
+                       A1 -> Leaf(A1)
 ```
 
-回答：
+问题：
 
-1. 最后一个 leaf 是 `Leaf(A1)` 时，`SessionState.messages` 是什么？
-2. 若追加 `U2 -> Leaf(U2)`，早期 `Leaf(U1)` 是否需要删除？为什么？
-3. 如果 `A1.parent_id` 指向不存在的外部 entry，`_detach_missing_parents()` 解决的是哪种导入
-   场景，`path_to_entry()` 又仍会拒绝什么坏数据？
+1. 当前 leaf 是 `Leaf(A1)` 时，`SessionState.messages` 包含哪条路径？
+2. 追加 `U2 -> Leaf(U2)` 后，为什么不删除 `Leaf(U1)`？
+3. 如果 `A1.parent_id` 指向外部不存在的 id，导入时的 `_detach_missing_parents()` 和
+   `path_to_entry()` 分别负责什么？
 
-验证入口：`tests/test_session.py`、`tests/test_coding_session.py` 的 active leaf / imported
-branch tests。目标是理解 leaf 是“选择器”，不是垃圾回收标记。
+参考结论：只 replay root-to-active-leaf；旧 leaf 是可回到的历史；缺失的外部根可在导入时脱钩，
+但路径中间缺 entry、重复 id 或 cycle 仍应报错。
 
-## 实验 2：模拟一次完整持久化
+源码：`src/tau_agent/session/{memory,tree}.py`；测试：`tests/test_session.py`。
 
-写出 `UserMessage("hi")` 从 prompt 到 JSONL 的顺序，至少包含：
+## 实验 2：追踪 `hi` 的两条写入
+
+画出一条 user message 完成后的顺序：
 
 ```text
 AgentHarness.prompt_message
-MessageEndEvent
-_persist_on_message_end
-MessageEntry + LeafEntry
-_refresh_persisted_state
+  -> MessageEndEvent
+  -> CodingSession._persist_on_message_end
+  -> MessageEntry
+  -> LeafEntry
+  -> _refresh_persisted_state
 ```
 
-然后插入故障：“`MessageEntry` 已成功，但写 `LeafEntry` 时 storage 临时失败”。解释下一次
-`_persist_message()` 为什么不创建第二条同内容 message。提示：检查 `_PendingMessageWrite`
-和 retry 时读取的 `durable_ids`。
+故障注入：假设 `MessageEntry` 已成功，`LeafEntry` 写入失败。下一次重试为什么不会再添加一条相同
+消息？
 
-运行：
+参考结论：`_PendingMessageWrite` 保留同一组 entry id；重试先读取 durable ids，只补缺的 entry。
 
-```bash
-uv run pytest tests/test_coding_session.py -q
-```
+测试：`test_message_persistence_retry_is_idempotent`、`test_prompt_persists_user_assistant_and_leaf_entries`。
 
-完成标准：能解释“event 的可见性”和“entry 的原子性”不是同一层的保证。
+## 实验 3：TUI 消失以后谁还在工作？
 
-## 实验 3：为什么 UI 不能承担持久化？
+场景：assistant 发出 tool call，用户取消，前端停止迭代事件。
 
-假设用户在 assistant 发出 tool call 后关闭 TUI 的 async event consumer。请用三句话解释：
+请用三句话回答：
 
-1. agent loop 最终如何合成 interrupted tool result；
-2. persistence listener 为何仍会收到它；
-3. 为什么下一次请求不会携带 dangling call。
+1. 谁合成了 `Tool call interrupted by user`？
+2. 为什么 persistence listener 仍能收到它？
+3. 为什么下一轮不会带着悬空 tool call 请求 provider？
 
-源码锚点：`tau_agent/harness.py:_run()`、`CodingSession._attach_persistence_listener()`、
-`CodingSession._reconcile_run_persistence()`。
+参考结论：`AgentHarness._run()` 的 `finally` 修复并主动通知 start/end；listener 独立订阅 harness，
+不依赖前端继续消费；修复后的 `ToolResultMessage` 会成为可 replay 的历史。
 
-运行：
+测试：`test_cancelled_prompt_teardown_persists_interrupted_tool_result`、`tests/test_tool_history.py`。
 
-```bash
-uv run pytest tests/test_agent_harness.py tests/test_tool_history.py -q
-```
+## 实验 4：手算 compact replay
 
-## 实验 4：模拟 compaction replay
-
-假设 active path 有 message entries `M1, M2, M3`，随后写：
+假设 active path 是 `M1, M2, M3`，随后追加：
 
 ```text
-CompactionEntry(summary=S, replaces_entry_ids=[M1, M2]) -> Leaf(compaction)
+Compaction(summary=S, replaces_entry_ids=[M1, M2]) -> Leaf(compaction)
 ```
 
-不看源码写出 replay 后的 messages。再打开 `SessionState._apply_compaction()` 校正：应有一个
-带固定前缀的 summary message 和原 `M3`，而不是删除整个 transcript。接着解释
-`first_kept_entry_id` 对调试/导出的价值。
+先写出模型下一次看到的 messages，再打开 `SessionState._apply_compaction()` 校对。
 
-运行：
+参考结论：结果是 `Previous conversation summary:\nS` 加上 `M3`；`M1/M2` 仍在 JSONL，便于审计、导出
+或其他分支使用。
 
-```bash
-uv run pytest tests/test_context_window.py tests/test_coding_session.py -q
-```
+测试：`test_session_compact_persists_summary_and_rebuilds_context`、`tests/test_context_window.py`。
 
-## 实验 5：candidate-first 的故障注入思考
-
-比较两个伪代码：
+## 实验 5：比较两种替换顺序
 
 ```text
-A: close(old); load(new); self.runtime = new
-B: new = load(candidate); publish(self, new); close(old)
+A: close(old); load(new); publish(new)
+B: new = load(candidate); publish(new); close(old)
 ```
 
-若 `load(new)` 因 trust 取消或 provider 创建失败，A 与 B 的用户可见状态各是什么？Tau 选择 B，
-但还做了两件事：对未发布 candidate 调 `aclose()`；发布后把 cleanup 的取消/异常 containment
-起来。说明这两件事分别修补了 B 的哪种资源问题。
+分别假设 trust 被取消、provider 创建失败、以及发布后 old runtime 关闭失败。写出用户能看到的状态。
 
-源码锚点：`session.py:reload`、`resume`、`new_session`、`_adopt_replacement`、
-`session_preparation.py:PreparedCodingSession`。
+参考结论：Tau 采用 B。发布前失败只关闭 candidate，旧 session 不变；发布后失败不能回滚已公开的新快照，
+但清理错误会被隔离。`PreparedCodingSession.abort()` 和 `_finish_adopted_runtime_close()` 正是为这两类
+资源问题服务的。
 
-## 实验 6：改动前的审查清单
+源码：`session.py` 的 `reload()`、`resume()`、`new_session()`、`_adopt_replacement()`，以及
+`session_preparation.py`。
 
-若你准备往 `CodingSession` 新增一个“可恢复的会话动作”，先逐项回答：
+## 实验 6：新增“可恢复动作”前的检查表
 
-- 它是临时 UI 反馈，还是必须跨重启存在？后者需要什么 entry？
-- 它是否改变 active context？若是，何时 `replace_messages()` 和 invalidate cache？
-- 它与 `last_parent_id`、`LeafEntry` 的关系是什么？
-- 若 storage 部分失败，稳定 id 与重试方式是什么？
-- 它是否创建 provider/runtime/task？谁把它加入 ownership ledger？
-- 可取消工作在哪里结束，publication boundary 在哪里？
-- 前端应等待哪一种 `CodingSessionEvent` 才认为操作完成？
+假设要加入一个新命令，逐项写答案：
 
-如果回答只是“在 TUI 按钮回调里改个变量”，说明能力放错了层。
+- 重启后还要存在吗？如果要，应该新增哪种 entry？
+- 它会改变 active messages 吗？何时调用 `replace_messages()`、何时失效 token cache？
+- 新 entry 的 parent 和 leaf 怎样连接？
+- storage 部分失败时，重试复用什么稳定 id？
+- 是否创建 provider/runtime/task？ownership ledger 由谁登记？
+- 哪一步是 publication boundary？取消发生在哪里才不会破坏旧快照？
+- 前端应该等待哪个 `CodingSessionEvent` 才算完成？
+
+如果答案是“在 TUI 按钮回调里改一个变量”，通常说明逻辑放错了层。
 
 ## 结业口试
 
-不看任何文件，连续回答以下问题：
+不看文件，连续回答：
 
-1. `CodingSession.load()` 为什么要在 `__init__()` 外？
-2. 为什么最后一条 JSONL entry 不一定等于当前 active conversation 的末端？
-3. `MessageEndEvent` 比 `AgentEndEvent` 更适合作为消息持久化边界的两个原因？
-4. compaction 如何降低下一轮上下文，却不损失审计历史？
-5. branch、resume、reload 三者各自替换什么？
-6. `owns_initial_provider` 的语义为什么不能从“谁创建对象”推断？
-7. 一个新前端为何应消费 `CodingSessionEvent`，而不读取 `_harness` 私有字段？
+1. `load()` 为什么不塞进 `__init__()`？
+2. 为什么最后一行 JSONL 不一定是当前对话末端？
+3. `MessageEndEvent` 比 `AgentEndEvent` 更适合作为持久化边界的两个原因？
+4. compact 如何减少上下文却保留审计历史？
+5. branch、resume、reload 分别替换什么？
+6. `owns_initial_provider` 表示什么，为什么不能看“谁创建对象”？
+7. 新前端为什么消费 `CodingSessionEvent`，而不是读取 `_harness` 私有字段？
 
-能稳定回答这七题，就已经拥有阅读 `session.py` 大部分演进提交和设计新能力所需的心智模型。
+答完后再跑：
+
+```bash
+uv run pytest tests/test_session.py tests/test_agent_harness.py tests/test_tool_history.py -q
+```
+
+能用自己的话解释每题，并指出一个对应测试，才算真正掌握，而不是记住术语。

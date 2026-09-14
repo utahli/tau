@@ -1,85 +1,92 @@
-# Tau 会话模块：费曼学习计划
+# Tau 会话模块：给新手的费曼学习指南
 
-本目录是一套独立材料，只以当前源码和测试为依据，聚焦
-`src/tau_coding/session.py` 及它直接协作的 session 模块。它不依赖同级任何已有学习资料。
+这组资料带你读懂 Tau 的 `CodingSession`。你不需要先读完几千行
+`src/tau_coding/session.py`；我们从一个最小问题开始：
 
-目标不是背下 4,000 多行 `session.py`，而是能用自己的话向新人解释：
+> 用户输入一句话后，Tau 怎样让 agent 工作、把结果保存下来，并在下次启动时恢复？
 
-> 一个 `CodingSession` 怎样把临时的 agent loop 变成可恢复、可分支、可压缩、可替换且不会
-> 泄漏 provider/extension 资源的编码会话？
+所有说明都以当前仓库的代码和测试为准。文中的函数名是“路标”，不是需要背诵的答案。
 
-## 先用一句话建立模型
+## 先补齐四个词
 
-把 `CodingSession` 想成机场塔台。
+- **provider**：真正调用模型服务的对象，例如 OpenAI、Anthropic 或 fake provider。
+- **message**：一次对话消息，可能是 user、assistant 或 tool result。
+- **entry**：写入 session 存储的一行结构化记录。它不只是消息，也可以记录模型切换、压缩或分支。
+- **harness**：可复用的 agent 大脑，负责模型循环、工具调用和内存中的 messages。
 
-- `AgentHarness` 是已经会飞的飞机：它持有内存 messages，运行模型与工具循环。
-- `SessionStorage` 是飞行记录仪：它只追加 JSONL entry，不直接知道 UI 或模型。
-- `CodingSession` 是塔台：在正确时机写记录、指向当前航线、替换飞机/跑道、通知前端，并在
-  飞机退役时关闭资源。
+## 一张总图
 
 ```text
-前端 input / command
+用户 / TUI / CLI
+       │ 输入、取消、选择分支
+       ▼
+CodingSession（编码环境）
+  ├─ 读取资源、trust、provider 和工具
+  ├─ 调用 AgentHarness
+  ├─ 把事件和已完成消息写入 SessionStorage
+  └─ 给前端发送 CodingSessionEvent
        │
        ▼
-CodingSession
-  ├─ 资源、trust、tools、provider、ExtensionRuntime 的装配
-  ├─ AgentHarness 的运行和队列
-  ├─ append-only entries 的持久化与 replay
-  ├─ branch / compact / resume / reload / new session
-  └─ CodingSessionEvent 给前端
+AgentHarness（可复用的 agent 大脑）
+  ├─ 内存中的 messages
+  ├─ provider + model
+  ├─ 工具循环
+  └─ steering/follow-up 队列
        │
        ▼
-tau_agent.AgentHarness ──> provider / tool loop
+SessionStorage（JSONL 或内存实现）
+  └─ append-only entries，重启后 replay
 ```
 
-关键结论：**harness 的 messages 是“下一次请求要带什么”；持久 entries 才是“重启后相信
-什么”。** Session 的责任就是让两者在受控边界重新对齐。
+最容易混淆的是两份“历史”：`harness.messages` 是下一次请求马上要使用的内存列表；JSONL
+entries 是重启时相信的持久记录。`SessionState` 是把后者 replay 后得到的派生视图。
 
-## 10 天学习计划
+## 推荐阅读顺序
 
-每次按费曼四步做：① 先读指定入口；② 合上源码用日常语言讲 3 分钟；③ 标出讲不清的
-术语；④ 只回到相关函数和测试补洞。每天最后写一个 5 行“给新人”的小结。
-
-| 天 | 核心问题 | 源码入口 | 费曼交付 |
-| --- | --- | --- | --- |
-| 1 | session 与 harness 各自拥有哪种状态？ | `session.py` 的 `CodingSessionConfig`、`__init__`；`tau_agent/harness.py` | 画出“配置、live runtime、durable history”三层。 |
-| 2 | 一次 `load()` 如何成为完整候选会话？ | `CodingSession.load()` | 不看源码按顺序说出读历史、trust、resources、provider、harness 的步骤。 |
-| 3 | JSONL 为什么是树，不是一条消息数组？ | `tau_agent/session/{entries,memory,tree,storage}.py` | 画出 `LeafEntry` 如何选择一条 root-to-leaf 路径。 |
-| 4 | 一条 prompt 的事件从哪来、往哪去？ | `CodingSession.prompt()`、`AgentHarness._run()` | 讲清 input hook、expand、queue、agent event、settled。 |
-| 5 | 为什么在 `MessageEndEvent` 持久化？ | `_attach_persistence_listener()` 到 `_reconcile_run_persistence()` | 描述消息 entry + leaf 两条写入的失败重试。 |
-| 6 | 取消、队列和中断工具结果怎样仍可恢复？ | `cancel()`、queue 方法、harness repair | 写出“前端停止消费事件”时仍写盘的原因。 |
-| 7 | compact 如何减上下文却不删除历史？ | `context_window.py`、`compact*()`、`_append_compaction()` | 用三条消息模拟 replay 后被摘要替换。 |
-| 8 | branch 如何回退又保留未来？ | `tree_choices()`、`branch_to_entry()`、`branch_summary.py` | 画出回到旧节点后新 leaf 与旧分支共存。 |
-| 9 | reload/resume/new 怎样“先准备，后发布”？ | `reload()`、`resume()`、`new_session()`、`_adopt_replacement()`、`session_preparation.py` | 用“换发动机不停机”的比喻解释 candidate-first。 |
-| 10 | 怎么审查与修改 session 代码？ | `tests/test_coding_session.py` | 选一条不变量，为它定位最窄测试和事件边界。 |
-
-建议测试顺序：
+### 第 0 步：先运行测试
 
 ```bash
-uv run pytest tests/test_session.py tests/test_session_manager.py -q
-uv run pytest tests/test_coding_session.py -q
-uv run pytest tests/test_context_window.py tests/test_tool_history.py -q
+uv run pytest tests/test_session.py tests/test_coding_session.py -q
 ```
 
-测试使用 fake provider、临时目录与内存 storage；学习会话机制时不需要真实 API key。
+测试使用 fake provider 和临时存储，不需要 API key。看到测试名时，先猜它要保护的行为，再读实现。
 
-## 阅读导航
+### 第 1 步：状态与启动
 
-| 文档 | 解决的问题 |
-| --- | --- |
-| [01-state-and-load.md](01-state-and-load.md) | 三种状态、entry tree、`load()` 的候选装配。 |
-| [02-turns-and-persistence.md](02-turns-and-persistence.md) | prompt/continue、事件、队列、push persistence 与错误收敛。 |
-| [03-history-transformations.md](03-history-transformations.md) | compact、branch、模型切换、会话替换和生命周期。 |
-| [04-feynman-labs.md](04-feynman-labs.md) | 复述卡、纸上演算、测试导读和设计审查题。 |
+阅读 [01-state-and-load.md](01-state-and-load.md)。你会学到配置、runtime、持久历史的区别，entry 树，
+以及 `CodingSession.load()` 怎样从空文件或旧文件准备一个可运行会话。
 
-## 必须守住的六条不变量
+### 第 2 步：一次回合与保存
 
-1. **append-only**：会话的历史不覆盖写；新事实以新 entry 表达。
-2. **活动路径唯一**：`LeafEntry.entry_id` 指向当前 root-to-leaf 路径的端点。
-3. **消息完整才持久化**：stream delta 不是 durable transcript；`MessageEndEvent` 才是边界。
-4. **失败可重试但不重复**：待写消息保留稳定 entry id，补写时先核对磁盘。
-5. **替换原子可见**：可取消工作在 publication 前；新 snapshot 一旦公开，旧资源只做清理。
-6. **资源恰好关闭一次**：session 显式登记自己拥有的 provider/runtime，关闭任务幂等。
+阅读 [02-turns-and-persistence.md](02-turns-and-persistence.md)。沿着 `prompt()` 走一遍，弄清楚
+事件从哪里产生、谁负责写盘、取消时为什么仍能留下完整的 tool result。
 
-学习全程都可以反问一句：这段代码在维护上面的哪条不变量？若答不出来，先不要继续读
-helper 的细节。
+### 第 3 步：改变上下文和运行环境
+
+阅读 [03-history-transformations.md](03-history-transformations.md)。这里解释压缩、分支、模型切换、
+`reload()`、`resume()`、`new_session()` 以及资源关闭。
+
+### 第 4 步：动手复述
+
+阅读 [04-feynman-labs.md](04-feynman-labs.md)。每个实验都先让你预测，再给源码入口和检查方式。
+
+## 六条必须守住的不变量
+
+1. **历史只追加，不覆盖旧事实。** 新变化用新 entry 表达。
+2. **`LeafEntry` 选择当前分支。** 文件里可以有很多未来，active path 只有一条。
+3. **完整消息才是持久化边界。** stream 中间的 delta 不能当作 transcript。
+4. **失败可以重试，但不能重复。** 待写消息会复用原 entry id。
+5. **候选先准备，成功后发布。** 取消或加载失败不能破坏当前 live session。
+6. **谁拥有资源，谁负责关闭，而且只关闭一次。** `owns_initial_provider` 表示 ownership，不表示“谁写了 `new`”。
+
+读任何 helper 时都问一句：它在保护哪条不变量？如果答不出来，先回到本指南的主流程。
+
+## 代码与测试地图
+
+| 要回答的问题 | 主要代码 | 推荐测试 |
+| --- | --- | --- |
+| entry 如何保存和重放？ | `src/tau_agent/session/{entries,memory,tree,storage}.py` | `tests/test_session.py` |
+| agent 如何发出事件？ | `src/tau_agent/harness.py`、`loop.py` | `tests/test_agent_harness.py` |
+| session 如何装配和持久化？ | `src/tau_coding/session.py` | `tests/test_coding_session.py` |
+| tool call 中断如何修复？ | `src/tau_agent/harness.py`、`tau_coding/session.py` | `tests/test_tool_history.py` |
+| 替换失败如何保持旧会话？ | `session.py`、`session_preparation.py` | `tests/test_coding_session.py` 与 `tests/test_project_trust.py` 中 replacement/reload 测试 |

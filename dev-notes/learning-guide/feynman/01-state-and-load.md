@@ -1,121 +1,106 @@
-# 01：状态、历史树与 `CodingSession.load()`
+# 01：先弄清楚“会话状态”是什么
 
-## 1. 不要把 session 误读成“消息列表”
+本章回答两个入门问题：`CodingSession` 里面到底保存了什么？程序重启后又从哪里恢复？
 
-`CodingSession` 同时协调三个状态源，任何一个都不能替代另外两个。
+## 1. 三份东西，不要混成一份
 
-| 状态 | 主要对象 | 权威问题 | 生命周期 |
-| --- | --- | --- | --- |
-| 输入蓝图 | `CodingSessionConfig` | “应使用什么 cwd、storage、provider 选择与策略？” | frozen dataclass；可用 `replace()` 产生新快照。 |
-| live runtime | `_harness`、`_extension_runtime`、`_owned_providers`、缓存/队列 | “下一次请求现在会怎样执行？” | 内存、可替换、必须关闭。 |
-| durable history | `SessionEntry` JSONL 与 `SessionState` | “重启后应该恢复成什么？” | append-only；通过 replay 投影。 |
+把一次编码会话想成一张工作台：
 
-给新人解释时可以说：蓝图是登机牌，runtime 是现在飞行中的飞机，history 是不可涂改的
-飞行记录。把飞机的座位表当成记录仪，会在崩溃后丢失；把 JSONL 当作实时 UI 状态，又会让
-每个字符流式落盘并无法正确回退。
+| 日常比喻 | 代码 | 作用 |
+| --- | --- | --- |
+| 操作说明 | `CodingSessionConfig` | cwd、存储、provider、模型、是否启用 skills 等“应该怎样运行”的输入。它是 frozen dataclass，修改时用 `dataclasses.replace()`。 |
+| 工作台上的物品 | `_harness`、`_extension_runtime`、provider、缓存和队列 | 当前进程马上要用的对象。它们在内存中，结束时要关闭。 |
+| 工作日志 | `SessionEntry` + `SessionState` | 写入 JSONL 的事实。重启时从这些 entry 重放出状态。 |
 
-`CodingSession.__init__()` 只接受已经构造好的 state/harness/resources，建立 ownership
-ledger、缓存、diagnostic logger 与 persistence listener。它没有磁盘读取或 trust prompt。
-这正是异步工厂 `load()` 存在的理由：对象只有准备完成才应该被前端看见。
+一个简单判断法：问“进程崩溃后还要不要知道它？”要知道的内容必须进 history；只服务于当前运行
+的对象属于 runtime。
 
-## 2. durable history 是 parent-pointer tree
+`CodingSession.__init__()` 只接收已经准备好的 state、harness 和资源，它不会偷偷读磁盘、弹 trust
+询问或创建 provider。这样做是为了让对象一旦交给前端，就已经可用。异步工厂
+`CodingSession.load()` 负责剩下的启动工作。
 
-入口：`src/tau_agent/session/entries.py`、`memory.py`、`tree.py`、`storage.py`。
+## 2. entry 为什么像树？
 
-每个 entry 有唯一 `id`、`parent_id` 与 timestamp。最重要的类型是：
+`src/tau_agent/session/entries.py` 定义了多种 entry。每条都有唯一 `id`、`parent_id` 和时间戳。
+消息只是其中一种；模型切换、压缩、标签、extension 自定义数据也各有 entry 类型。
 
-| entry | 给 replay 的意义 |
-| --- | --- |
-| `SessionInfoEntry` | cwd/创建时间等 session metadata。 |
-| `ModelChangeEntry` / `ThinkingLevelChangeEntry` | 在这条路径上当前模型、provider 与 thinking level。 |
-| `MessageEntry` | 一条完整 user/assistant/tool/custom message。 |
-| `LeafEntry` | 指向当前活跃路径的真实端点，自己也是追加记录。 |
-| `CompactionEntry` | 指定被摘要替代的 message entry ids。 |
-| `BranchSummaryEntry` | 将被离开的分支的信息以上下文消息带回新路径。 |
-| `LabelEntry` / `CustomEntry` | 人类标签和 extension-owned 状态。 |
-
-例如先得到 A、B，再回到 A 继续得到 C：
+`LeafEntry` 是“当前选中的末端”，不是删除标记。假设先聊出 A、B，后来回到 A 继续聊 C：
 
 ```text
-root -> A -> B -> Leaf(B)       # 第一次的未来仍保留
-         \-> C -> Leaf(C)       # 新 Leaf 使 C 分支成为 active
+Info -> Model -> Think -> A -> B -> Leaf(B)
+                              \
+                               C -> Leaf(C)   # 当前活动分支
 ```
 
-`SessionState.from_entries(entries, leaf_id=...)` 并不是“拿最后一行”。它先由
-`path_to_entry()` 从 leaf 反向找 parent，检测重复 id、缺 parent、cycle 后再正向 replay。
-在 replay 中 `CompactionEntry` 用摘要替代指定 rows；`BranchSummaryEntry` 变成一条受控的
-`UserMessage`。所以 `SessionState.messages` 是派生视图，而不是 JSONL 的原样拷贝。
+磁盘仍保留 B；最后一个 `LeafEntry` 告诉 Tau 当前应该沿哪条路线读取。
 
-`JsonlSessionStorage.append_batch()` 是 storage transaction boundary：完整 batch 可见或保留
-旧文件。它在同目录临时文件写入、fsync、`replace`、directory fsync，并使用每个 transcript
-的跨进程锁。这一点解释为什么 session 在写 `entry + leaf` 这种必须成对可见的操作时偏好
-batch。
+## 3. replay：从树还原成模型看到的消息
 
-## 3. `load()`：从冷记录到候选 runtime
+`SessionState.from_entries(entries, leaf_id=...)` 的工作可以拆成四步：
 
-按下列顺序读 `CodingSession.load()`；每一步都有意放在下一步之前。
+1. `path_to_entry()` 从 leaf 沿 `parent_id` 向上找根，再反转成 root-to-leaf 顺序；
+2. 检查重复 id、缺少 parent 和 cycle，坏数据直接报 `SessionTreeError`；
+3. 按顺序处理 entry：消息进入列表，模型/思考级别更新为最新值；
+4. `CompactionEntry` 把指定旧消息替换成摘要，`BranchSummaryEntry` 变成一条带固定前缀的 user message。
+
+因此 `SessionState.messages` 不是 JSONL 原样切片，而是“当前 active path 的派生结果”。这就是为什么
+文件里有分支，但 harness 只接收一条线性的 messages 序列。
+
+## 4. `load()` 的启动顺序
+
+打开 `src/tau_coding/session.py` 的 `CodingSession.load()`，按下面顺序对照代码：
 
 ```text
-1. storage.read_all()
-2. 空历史：在内存准备 SessionInfo -> ModelChange -> ThinkingChange
-3. 非空历史：detach 外来 root 的 missing parent；找 latest Leaf；replay active path
-4. 建立“只含 eligible extension”的新 ExtensionRuntime
-5. ProjectTrustCoordinator.resolve(cwd)，再 filter resource paths
-6. 若 trusted 且显式开启：才加载 project extension
-7. 选择/创建 provider，计算 active model、image support、tools、system prompt
-8. 建 AgentHarness(messages=state.messages)，再建 CodingSession
-9. 登记 provider ownership；repair tool history；绑定 extension；延迟 session_start
+读取 storage
+  ├─ 空文件：先在内存准备 Info -> Model -> Thinking
+  └─ 非空：整理缺失的外部 parent，找到最新 Leaf 并 replay
+创建只加载“允许范围”的 extension runtime
+解析项目 trust，再决定是否加载项目目录的 extension
+加载 skills、prompt templates、AGENTS/context 文件
+选择或创建 provider，确定 active model 和图片能力
+创建 coding tools，组合 extension tools
+生成 system prompt
+用 state.messages 创建 AgentHarness
+绑定 persistence listener；把 session_start 留到前端准备好以后再发
 ```
 
-### 3.1 为什么空 session 不立即写三条初始 entry？
+### 空 session 为什么先不写盘？
 
-新 session 的 `SessionInfoEntry → ModelChangeEntry → ThinkingLevelChangeEntry` 先保存在
-`pending_initial_entries`，之后由 `_ensure_session_initialized()` 在第一次权威写入时提交。
-这避免“仅打开后立刻退出”制造空 transcript；同时 entry id 已经稳定，可在延迟写入时去重。
-当 `defer_authoritative_writes=True` 时，它们进入 `_prepared_entries`，由外部 preparation
-流程统一提交（见第 03 篇）。
+空文件会先生成三条初始 entry，但放在 `pending_initial_entries` 中。第一次权威写入（通常是第一条
+完成的消息）时才提交；如果用户只是打开后退出，就不会留下没有内容的 transcript。
+配置
+`defer_authoritative_writes=True` 时，这些 entry 进入 `_prepared_entries`，等待
+`PreparedCodingSession.adopt()` 统一提交。
 
-### 3.2 为什么先建 eligible runtime、再做 project trust？
+### 为什么 trust 在加载项目 extension 之前？
 
-extension 可以执行 Python。`load()` 创建一个 **新的 cwd-bound runtime**，先调用
-`extension_runtime.load(... include_project_dir=False)`；trust 解析完成并且配置允许后，才加载
-project directory。resume/reload/new session 也不复用 source 项目的 project registration。
-这使“用户取消 trust”在 import 前结束，而不是加载后才显示 warning。
+extension 可以执行 Python。`load()` 先创建 `include_project_dir=False` 的 runtime，解析 trust 后，
+只有在“可信且配置允许”时才加载项目目录。用户拒绝 trust 时，代码在 import 之前就结束；skills、
+context 文件和默认 coding tools 的过滤则由资源/trust 规则分别决定，不等于整个 agent 消失。
 
-### 3.3 provider、tools、system 的装配顺序
+### 为什么 `session_start` 延迟？
 
-若调用方没有给 `config.provider`，`_prepare_provider_selection()` 在 provider registry 已经
-准备好后选择静态或动态 provider。之后才根据 active model 产生 `ImageSupportState`；默认
-tools 依赖它来决定 read 图片的行为。extension 组合 tools 后，`build_system_prompt()` 才能
-准确列出最终工具、skills、context 与 extension sections。最终 harness 只收到 provider、model、
-system、tools、messages 这几个 portable 值。
+extension 的启动处理器可能要弹通知或对话框。`load()` 只设置 `_session_start_pending=True`；前端装好
+UI bridge 后调用 `emit_pending_session_start()`，随后才提交 staged trust decision。这样尚未被采用的
+candidate 不会污染 trust cache。
 
-### 3.4 session_start 为什么延迟？
+## 5. 什么时候 state 和 harness 对齐？
 
-`load()` 末尾只设 `_session_start_pending=True`。宿主在装好 UI bridge 后调用
-`emit_pending_session_start()`，此时 extension handler 才可以安全弹窗/通知；随后才提交 staged
-trust decision。这也让一个未被采用的 candidate 不会污染 trust cache。
+普通新消息由 harness 追加到内存；persistence listener 写完 entry 后刷新 `_state`。需要改变上下文
+形状的操作（分支、压缩、tool-history repair）会先刷新 state，再调用
+`harness.replace_messages(_state.messages)`。
 
-## 4. `SessionState` 与 harness 何时同步？
+想想这个问题：`append_custom_entry()` 为什么既写 `CustomEntry` 又写 `LeafEntry`？因为只有成为
+root-to-leaf 路径的一部分，resume 时 replay 才能看到它。
 
-`_refresh_persisted_state(leaf_id=...)` 读取 storage 并 replay active path，更新 `_state`；
-需要重写下一轮上下文的操作（compaction、branch、repair）接着调用
-`harness.replace_messages(_state.messages)`。普通新消息由 harness 自己 append，persistence
-listener 只刷新 `_state`；二者在下一操作点继续对齐。
+## 6. 纸上练习
 
-用这个问题检查理解：为什么 `append_custom_entry()` 写 entry 后也写 leaf 并 refresh？因为
-custom entry 若没有成为 active root-to-leaf 路径的一部分，resume 时 `SessionState` 看不到它。
+假设存储为空，cwd 是 `P`，模型最终选为 `m`：
 
-## 5. 第一天的纸上演算
+1. 画出内存中的三条初始 entry 及 parent 关系；
+2. 说明为什么此刻 JSONL 仍可能是空的；
+3. 追加一条 user message 后，画出 `MessageEntry + LeafEntry`；
+4. 再创建第二条分支，指出 harness 为什么只看到最新 leaf 路径。
 
-假设空 storage、模型 `m`、working directory `P`：
-
-1. 写出 `load()` 内存中先出现的三条 entry，标明 parent。
-2. 说明 storage 此刻仍可能为空。
-3. 假设 P 不可信：skills、AGENTS、project extensions 哪些会被过滤？默认 coding tools 是否
-   因此消失？
-4. 假设 first prompt 完成：哪一个动作会迫使初始三条 entry 先落盘？
-
-用 `tests/test_coding_session.py` 中 `test_load_restores_existing_transcript`、
-`test_load_restores_active_leaf_branch`、`test_load_detaches_missing_root_parent_from_imported_branch`
-来核对答案。完成标准是能解释“为什么 history 有分支但 harness 只看一条 messages 序列”。
+核对入口：`tests/test_coding_session.py` 中的 `test_load_restores_existing_transcript`、
+`test_load_restores_active_leaf_branch`，以及 `tests/test_session.py` 的 tree/replay 测试。

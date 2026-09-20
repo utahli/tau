@@ -35,7 +35,7 @@ Previous conversation summary:
 ## 2. branch：换路线，不抹掉未来
 
 `tree_choices()` 从 entry 树生成可选节点；`branch_to_entry()` 要求 harness 空闲，然后追加新的
-`LeafEntry`，把目标节点设为 active。旧后代不删除，稍后仍可再次选择。
+`LeafEntry` 兼容记录，并用显式目标重放当前路径。旧后代不删除，稍后仍可再次选择。
 
 ```text
 I -> U1 -> A1 -> U2 -> A2 -> Leaf(A2)

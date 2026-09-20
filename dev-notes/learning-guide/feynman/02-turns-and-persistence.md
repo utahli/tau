@@ -53,7 +53,7 @@ extension 发起的输入规则一致。
   -> 写入并刷新 SessionState
 ```
 
-`LeafEntry` 看起来多余，却是分支选择器：没有它，重启时无法知道这条消息是否是 active path 的末端。
+当前写入的 `LeafEntry` 是历史格式兼容记录。它和消息一起写入，保证旧 transcript 可读取；当前 replay 默认根据最后一个非 `leaf` entry 推导 tip，需要切换到特定路径时显式传入 `leaf_id`。
 
 不用 `MessageStartEvent`：那只是半成品；不用 `AgentEndEvent`：一轮里 user、assistant、tool result
 都应分别恢复，而且 agent end 已经太晚。

@@ -73,7 +73,7 @@ uv run pytest tests/test_session.py tests/test_coding_session.py -q
 ## 六条必须守住的不变量
 
 1. **历史只追加，不覆盖旧事实。** 新变化用新 entry 表达。
-2. **`LeafEntry` 选择当前分支。** 文件里可以有很多未来，active path 只有一条。
+2. **active path 只有一条。** 当前实现默认从最后一个非 `leaf` entry 推导 tip；`LeafEntry` 主要作为旧格式兼容记录，显式 replay 时仍可传入 `leaf_id`。
 3. **完整消息才是持久化边界。** stream 中间的 delta 不能当作 transcript。
 4. **失败可以重试，但不能重复。** 待写消息会复用原 entry id。
 5. **候选先准备，成功后发布。** 取消或加载失败不能破坏当前 live session。

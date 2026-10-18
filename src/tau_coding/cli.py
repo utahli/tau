@@ -31,6 +31,7 @@ from tau_coding.models_dev_store import (
     ModelsDevRefreshResult,
     refresh_models_dev_catalog,
 )
+from tau_coding.paths import TauPaths
 from tau_coding.project_trust import TrustDefault, TrustOverride
 from tau_coding.logging_config import configure_debug_logging, is_debug_env_set
 from tau_coding.provider_config import (
@@ -387,6 +388,11 @@ def main(
     if version:
         typer.echo(f"tau {current_version}")
         raise typer.Exit()
+
+    try:
+        TauPaths()
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="TAU_HOME") from exc
 
     if ctx.invoked_subcommand is not None:
         return

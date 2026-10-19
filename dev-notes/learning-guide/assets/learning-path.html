@@ -1,0 +1,151 @@
+<html style="margin:0;padding:0;">
+<title>Tau coding 层 · 初学 Agent 开发学习路线图</title>
+<div style="width:100%;box-sizing:border-box;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#f6f7fb;color:#1f2430;padding:28px 20px 40px;">
+  <div style="max-width:980px;margin:0 auto;">
+    <div style="text-align:center;margin-bottom:8px;">
+      <div style="font-size:26px;font-weight:800;letter-spacing:1px;">Tau coding 层 · 初学 Agent 开发学习路线</div>
+      <div style="font-size:14px;color:#5a6472;margin-top:6px;">3 周 · 7 阶段 + 毕业项目 · 每阶段 = 概念 → 源码 → 练习 → 里程碑</div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:14px 0 24px;font-size:14px;">
+      <span style="background:#e8ecf8;color:#3b4cc0;padding:4px 10px;border-radius:20px;">tau_coding 环境</span>
+      <span style="background:#e8f4ea;color:#1e7a3c;padding:4px 10px;border-radius:20px;">tau_agent 大脑</span>
+      <span style="background:#fdeee4;color:#a85a18;padding:4px 10px;border-radius:20px;">tau_ai 模型层</span>
+    </div>
+
+    <div style="position:relative;padding-left:0;">
+
+      <div style="display:flex;gap:14px;align-items:stretch;margin-bottom:0;">
+        <div style="flex:0 0 120px;text-align:center;">
+          <div style="width:58px;height:58px;margin:0 auto;border-radius:50%;background:#3b4cc0;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 4px 10px rgba(59,76,192,.25);">阶段 0</div>
+        </div>
+        <div style="flex:1;background:#fff;border:1px solid #e3e7f0;border-left:4px solid #3b4cc0;border-radius:10px;padding:14px 18px;margin-bottom:20px;">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+            <span style="font-size:16px;font-weight:700;">认识一个 Agent 系统</span>
+            <span style="font-size:13px;background:#eef1f8;color:#4a5568;padding:2px 8px;border-radius:12px;">0.5~1 天</span>
+          </div>
+          <div style="font-size:14px;color:#4a5568;margin:6px 0;">概念：大脑 / 环境 / 前端三分 · Agent 循环 · 事件流</div>
+          <div style="font-size:13.5px;color:#6b7686;font-family:ui-monospace,Menlo,monospace;margin:4px 0;">源码：<span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">cli.py:193 main()</span> · README Philosophy</div>
+          <div style="font-size:13.5px;color:#1e7a3c;font-weight:600;margin-top:4px;">里程碑：画出一次 tau -p 的十步链路图</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:stretch;margin-bottom:0;">
+        <div style="flex:0 0 120px;text-align:center;">
+          <div style="width:58px;height:58px;margin:0 auto;border-radius:50%;background:#3b4cc0;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 4px 10px rgba(59,76,192,.25);">阶段 1</div>
+        </div>
+        <div style="flex:1;background:#fff;border:1px solid #e3e7f0;border-left:4px solid #3b4cc0;border-radius:10px;padding:14px 18px;margin-bottom:20px;">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+            <span style="font-size:16px;font-weight:700;">事件与消息：Agent 的通用语言</span>
+            <span style="font-size:13px;background:#eef1f8;color:#4a5568;padding:2px 8px;border-radius:12px;">1 天</span>
+          </div>
+          <div style="font-size:14px;color:#4a5568;margin:6px 0;">概念：provider 事件 → agent 事件 → session 事件 · 事件是契约 · 四种输出模式</div>
+          <div style="font-size:13.5px;color:#6b7686;font-family:ui-monospace,Menlo,monospace;margin:4px 0;">源码：<span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">tau_coding/events.py</span> · <span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">rendering/base.py</span> · <span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">plain.py</span></div>
+          <div style="font-size:13.5px;color:#1e7a3c;font-weight:600;margin-top:4px;">练习：--mode json 跑一次，给每个事件归类；写一个 CountingRenderer</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:stretch;margin-bottom:0;">
+        <div style="flex:0 0 120px;text-align:center;">
+          <div style="width:58px;height:58px;margin:0 auto;border-radius:50%;background:#3b4cc0;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 4px 10px rgba(59,76,192,.25);">阶段 2</div>
+        </div>
+        <div style="flex:1;background:#fff;border:1px solid #e3e7f0;border-left:4px solid #3b4cc0;border-radius:10px;padding:14px 18px;margin-bottom:20px;">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+            <span style="font-size:16px;font-weight:700;">工具：Agent 的手</span>
+            <span style="font-size:13px;background:#eef1f8;color:#4a5568;padding:2px 8px;border-radius:12px;">2 天</span>
+          </div>
+          <div style="font-size:14px;color:#4a5568;margin:6px 0;">概念：工具 = schema + 异步执行器 · 参数校验 · 截断 · 多模态降级 · 并发锁</div>
+          <div style="font-size:13.5px;color:#6b7686;font-family:ui-monospace,Menlo,monospace;margin:4px 0;">源码：<span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">tools.py create_coding_tools</span> · <span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">read/write/edit/bash</span></div>
+          <div style="font-size:13.5px;color:#1e7a3c;font-weight:600;margin-top:4px;">里程碑：新增 list_dir 工具，通过 AgentTool 协议 + 测试</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:stretch;margin-bottom:0;">
+        <div style="flex:0 0 120px;text-align:center;">
+          <div style="width:58px;height:58px;margin:0 auto;border-radius:50%;background:#3b4cc0;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 4px 10px rgba(59,76,192,.25);">阶段 3</div>
+        </div>
+        <div style="flex:1;background:#fff;border:1px solid #e3e7f0;border-left:4px solid #3b4cc0;border-radius:10px;padding:14px 18px;margin-bottom:20px;">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+            <span style="font-size:16px;font-weight:700;">装配与信任：接入真实世界</span>
+            <span style="font-size:13px;background:#eef1f8;color:#4a5568;padding:2px 8px;border-radius:12px;">2 天</span>
+          </div>
+          <div style="font-size:14px;color:#4a5568;margin:6px 0;">概念：资源发现 · 项目信任先于资源 · 系统提示组装 · 候选优先装配 prepare→adopt</div>
+          <div style="font-size:13.5px;color:#6b7686;font-family:ui-monospace,Menlo,monospace;margin:4px 0;">源码：<span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">session.py load()</span> · <span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">session_preparation.py</span> · <span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">system_prompt.py</span></div>
+          <div style="font-size:13.5px;color:#1e7a3c;font-weight:600;margin-top:4px;">里程碑：画 load() 时序图；讲清信任为何先于资源</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:stretch;margin-bottom:0;">
+        <div style="flex:0 0 120px;text-align:center;">
+          <div style="width:58px;height:58px;margin:0 auto;border-radius:50%;background:#3b4cc0;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 4px 10px rgba(59,76,192,.25);">阶段 4</div>
+        </div>
+        <div style="flex:1;background:#fff;border:1px solid #e3e7f0;border-left:4px solid #3b4cc0;border-radius:10px;padding:14px 18px;margin-bottom:20px;">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+            <span style="font-size:16px;font-weight:700;">会话与上下文：Agent 的记忆</span>
+            <span style="font-size:13px;background:#eef1f8;color:#4a5568;padding:2px 8px;border-radius:12px;">2 天</span>
+          </div>
+          <div style="font-size:14px;color:#4a5568;margin:6px 0;">概念：追加式 JSONL + replay · 上下文预算 · auto/overflow/manual 压缩 · 分支恢复</div>
+          <div style="font-size:13.5px;color:#6b7686;font-family:ui-monospace,Menlo,monospace;margin:4px 0;">源码：<span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">context_window.py</span> · <span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">session.py _try_auto_compact</span> · <span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">branch_to_entry</span></div>
+          <div style="font-size:13.5px;color:#1e7a3c;font-weight:600;margin-top:4px;">里程碑：从 JSONL 手工重建会话状态</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:stretch;margin-bottom:0;">
+        <div style="flex:0 0 120px;text-align:center;">
+          <div style="width:58px;height:58px;margin:0 auto;border-radius:50%;background:#3b4cc0;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 4px 10px rgba(59,76,192,.25);">阶段 5</div>
+        </div>
+        <div style="flex:1;background:#fff;border:1px solid #e3e7f0;border-left:4px solid #3b4cc0;border-radius:10px;padding:14px 18px;margin-bottom:20px;">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+            <span style="font-size:16px;font-weight:700;">Provider 与身份：模型从哪来</span>
+            <span style="font-size:13px;background:#eef1f8;color:#4a5568;padding:2px 8px;border-radius:12px;">1.5 天</span>
+          </div>
+          <div style="font-size:14px;color:#4a5568;margin:6px 0;">概念：catalog → 配置 → 凭据 → 客户端 · 定义/偏好/秘密三分 · 请求边界刷新 · FakeProvider 离线测试</div>
+          <div style="font-size:13.5px;color:#6b7686;font-family:ui-monospace,Menlo,monospace;margin:4px 0;">源码：<span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">provider_runtime.py create_model_provider</span> · <span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">tau_ai/fake.py</span></div>
+          <div style="font-size:13.5px;color:#1e7a3c;font-weight:600;margin-top:4px;">里程碑：可复用的离线会话测试模板</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:stretch;margin-bottom:0;">
+        <div style="flex:0 0 120px;text-align:center;">
+          <div style="width:58px;height:58px;margin:0 auto;border-radius:50%;background:#3b4cc0;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 4px 10px rgba(59,76,192,.25);">阶段 6</div>
+        </div>
+        <div style="flex:1;background:#fff;border:1px solid #e3e7f0;border-left:4px solid #3b4cc0;border-radius:10px;padding:14px 18px;margin-bottom:20px;">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+            <span style="font-size:16px;font-weight:700;">扩展与前端：生态与可移植</span>
+            <span style="font-size:13px;background:#eef1f8;color:#4a5568;padding:2px 8px;border-radius:12px;">2 天</span>
+          </div>
+          <div style="font-size:14px;color:#4a5568;margin:6px 0;">概念：受控钩子（输入/工具/UI bridge）· overlay/layer 注册 · 一个事件流多个前端 · RPC</div>
+          <div style="font-size:13.5px;color:#6b7686;font-family:ui-monospace,Menlo,monospace;margin:4px 0;">源码：<span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">extensions/api.py</span> · <span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">data/examples/extensions/hello_tool.py</span> · <span style="background:#eef1f8;padding:1px 6px;border-radius:4px;">rpc.py</span></div>
+          <div style="font-size:13.5px;color:#1e7a3c;font-weight:600;margin-top:4px;">里程碑：自己的扩展在真实 Tau 里跑起来</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:stretch;margin-bottom:0;">
+        <div style="flex:0 0 120px;text-align:center;">
+          <div style="width:58px;height:58px;margin:0 auto;border-radius:50%;background:#d97706;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 4px 10px rgba(217,119,6,.3);">毕业</div>
+        </div>
+        <div style="flex:1;background:#fff8ef;border:1px solid #f2e3c8;border-left:4px solid #d97706;border-radius:10px;padding:14px 18px;margin-bottom:6px;">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+            <span style="font-size:16px;font-weight:700;">毕业项目（四选一）</span>
+            <span style="font-size:13px;background:#fdf0dc;color:#a85a18;padding:2px 8px;border-radius:12px;">2~3 天</span>
+          </div>
+          <div style="font-size:14px;color:#4a5568;margin:6px 0;display:flex;flex-wrap:wrap;gap:8px;">
+            <span style="background:#fff;border:1px solid #e8d9bd;padding:3px 10px;border-radius:16px;">A 新增生产级工具</span>
+            <span style="background:#fff;border:1px solid #e8d9bd;padding:3px 10px;border-radius:16px;">B 迷你 Agent（FakeProvider）</span>
+            <span style="background:#fff;border:1px solid #e8d9bd;padding:3px 10px;border-radius:16px;">C 自定义前端渲染器</span>
+            <span style="background:#fff;border:1px solid #e8d9bd;padding:3px 10px;border-radius:16px;">D 完整扩展（钩子组合）</span>
+          </div>
+          <div style="font-size:13.5px;color:#1e7a3c;font-weight:600;margin-top:6px;">交付：可运行代码 + ≥2 个测试 + 3 分钟费曼讲解 + 架构说明</div>
+        </div>
+      </div>
+
+    </div>
+
+    <div style="margin-top:26px;background:#fff;border:1px solid #e3e7f0;border-radius:10px;padding:14px 18px;font-size:14px;color:#4a5568;line-height:1.9;">
+      <div style="font-weight:700;color:#1f2430;margin-bottom:6px;">贯穿全程的三条主线</div>
+      <div>① <b style="color:#3b4cc0;">边界</b>：大脑（tau_agent）不知道文件系统 / Textual / ~/.tau —— 前端只消费 CodingSessionEvent</div>
+      <div>② <b style="color:#3b4cc0;">安全</b>：信任先于资源，未信任项目的 AGENTS.md / SYSTEM.md / skills 不进运行时</div>
+      <div>③ <b style="color:#3b4cc0;">可验证</b>：所有实验用 tau_ai.fake.FakeProvider 离线驱动，tests/ 是活文档</div>
+    </div>
+  </div>
+</div>
+</html>
